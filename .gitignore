@@ -1,0 +1,145 @@
+# =========================================================
+# Flutter / Dart
+# =========================================================
+
+.dart_tool/
+.packages
+.pub/
+build/
+.flutter-plugins
+.flutter-plugins-dependencies
+.pub-cache/
+.flutter_tool_state
+
+# Flutter generated files
+**/doc/api/
+**/coverage/
+
+# Generated plugin registrant
+**/GeneratedPluginRegistrant.*
+
+# =========================================================
+# IDE / Editors
+# =========================================================
+
+.idea/
+.vscode/
+
+# VS Code
+*.code-workspace
+
+# Android Studio / IntelliJ
+*.iml
+*.ipr
+*.iws
+
+# =========================================================
+# OS generated files
+# =========================================================
+
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# =========================================================
+# Android
+# =========================================================
+
+android/.gradle/
+android/local.properties
+android/.idea/
+android/*.iml
+android/app/*.iml
+
+# Android build outputs
+android/app/build/
+android/build/
+android/.cxx/
+
+# NDK
+**/.cxx/
+
+# =========================================================
+# Android signing / private keys
+# =========================================================
+
+# Do NOT upload signing passwords or keystores
+android/key.properties
+android/*.jks
+android/*.keystore
+
+# =========================================================
+# Gradle
+# =========================================================
+
+.gradle/
+gradle-app.setting
+gradle-app.setting.lock
+
+# =========================================================
+# Firebase / Google
+# =========================================================
+
+# Firebase CLI local state
+.firebase/
+.firebaserc
+
+# Firebase emulator data
+firebase-debug.log
+firebase-debug.*.log
+
+# Firebase hosting cache
+.firebase/
+
+# =========================================================
+# Environment / secrets
+# =========================================================
+
+.env
+.env.*
+!.env.example
+
+# Private configuration files
+secrets/
+secrets.*
+*.pem
+*.p12
+*.key
+
+# =========================================================
+# Logs
+# =========================================================
+
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# =========================================================
+# Temporary files
+# =========================================================
+
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+
+# =========================================================
+# Local backup files
+# =========================================================
+
+android.backup/
+*.backup
+
+# Android signing / private keys
+android/key.properties
+android/app/*.jks
+android/app/*.keystore
+
+# Node.js dependencies
+**/node_modules/
+
+# Local AI / agent tooling
+.agents/
+.claude/
