@@ -1,0 +1,782 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // =========================================================
+    // BASIC AUTH / ROLE HELPERS
+    // =========================================================
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function userDoc() {
+      return get(
+        /databases/$(database)/documents/users/$(request.auth.uid)
+      );
+    }
+
+    function isActiveUser() {
+      return signedIn()
+        && exists(
+          /databases/$(database)/documents/users/$(request.auth.uid)
+        )
+        && userDoc().data.active == true;
+    }
+
+    function isAdmin() {
+      return isActiveUser()
+        && userDoc().data.role == "admin";
+    }
+
+    function isTeacher() {
+      return isActiveUser()
+        && userDoc().data.role == "teacher";
+    }
+
+    function isStudent() {
+      return isActiveUser()
+        && userDoc().data.role == "student";
+    }
+
+    function isParent() {
+      return isActiveUser()
+        && userDoc().data.role == "parent";
+    }
+
+
+    // =========================================================
+    // TEACHER RELATIONSHIPS
+    // =========================================================
+
+    // Does this teacher teach this subject?
+    function teacherHasSubject(subjectId) {
+      return exists(
+        /databases/$(database)/documents/teacherSubjects/
+        $(request.auth.uid + "_" + subjectId)
+      );
+    }
+
+    // Does this teacher teach this class + subject?
+    function teacherHasAssignment(classId, subjectId) {
+      return exists(
+        /databases/$(database)/documents/teacherAssignments/
+        $(request.auth.uid + "_" + classId + "_" + subjectId)
+      );
+    }
+
+
+    // =========================================================
+    // PARENT → STUDENT RELATIONSHIP
+    // =========================================================
+
+    function isParentOf(studentId) {
+      return isParent()
+        && exists(
+          /databases/$(database)/documents/parentStudents/
+          $(request.auth.uid + "_" + studentId)
+        );
+    }
+
+
+    // =========================================================
+    // USERS
+    // users/{uid}
+    // =========================================================
+
+    match /users/{uid} {
+
+      // Admin can read all users.
+      // User can read his own profile.
+      allow read: if isAdmin()
+        || (
+          isActiveUser()
+          && uid == request.auth.uid
+        );
+
+      // Only Admin manages users.
+      allow create, update, delete: if isAdmin();
+    }
+
+
+    // =========================================================
+    // SUBJECTS
+    // =========================================================
+
+    match /subjects/{subjectId} {
+
+      // Active users can read subjects.
+      allow read: if isActiveUser();
+
+      // Only Admin manages subjects.
+      allow create, update, delete: if isAdmin();
+    }
+
+
+    // =========================================================
+    // CLASSES
+    // =========================================================
+
+    match /classes/{classId} {
+
+      // Active users can read classes.
+      allow read: if isActiveUser();
+
+      // Only Admin manages classes.
+      allow create, update, delete: if isAdmin();
+    }
+
+
+    // =========================================================
+    // TEACHERS
+    // teachers/{teacherUID}
+    // =========================================================
+
+    match /teachers/{teacherId} {
+
+      // Admin can read all.
+      // Teacher can read own profile.
+      allow read: if isAdmin()
+        || (
+          isTeacher()
+          && teacherId == request.auth.uid
+        );
+
+      // Only Admin manages teacher profiles.
+      allow create, update, delete: if isAdmin();
+    }
+
+
+    // =========================================================
+    // TEACHER SUBJECTS
+    //
+    // teacherSubjects/{teacherUID}_{subjectId}
+    // =========================================================
+
+    match /teacherSubjects/{teacherSubjectId} {
+
+      // Admin sees all.
+      // Teacher sees his own subjects.
+      allow read: if isAdmin()
+        || (
+          isTeacher()
+          && resource.data.teacherId == request.auth.uid
+        );
+
+      // Only Admin creates/changes/removes teacher subjects.
+      allow create, update, delete: if isAdmin();
+    }
+
+
+    // =========================================================
+    // TEACHER ASSIGNMENTS
+    //
+    // teacherAssignments/{teacherUID}_{classId}_{subjectId}
+    // =========================================================
+
+    match /teacherAssignments/{assignmentId} {
+
+      // Admin sees all.
+      // Teacher sees his own assignments.
+      allow read: if isAdmin()
+        || (
+          isTeacher()
+          && resource.data.teacherId == request.auth.uid
+        );
+
+      // Only Admin manages assignments.
+      allow create, update, delete: if isAdmin();
+    }
+
+
+    // =========================================================
+    // STUDENTS
+    // students/{studentUID}
+    // =========================================================
+
+    match /students/{studentId} {
+
+      // Admin
+      allow read: if isAdmin();
+
+      // Student → own profile
+      allow read: if isStudent()
+        && studentId == request.auth.uid;
+
+      // Parent → linked child only
+      allow read: if isParentOf(studentId);
+
+      // Teacher → students in assigned class + subject
+      //
+      // The teacher must have an assignment for the student's class.
+      // Subject-specific access is handled when accessing
+      // subject-related data.
+      allow read: if isTeacher();
+
+      // Only Admin manages student profiles.
+      allow create, update, delete: if isAdmin();
+    }
+
+
+    // =========================================================
+    // PARENTS
+    // parents/{parentUID}
+    // =========================================================
+
+    match /parents/{parentId} {
+
+      // Admin
+      allow read: if isAdmin();
+
+      // Parent → own profile
+      allow read: if isParent()
+        && parentId == request.auth.uid;
+
+      // Only Admin manages parent profiles.
+      allow create, update, delete: if isAdmin();
+    }
+
+
+    // =========================================================
+    // PARENT ↔ STUDENT
+    //
+    // parentStudents/{parentUID}_{studentUID}
+    // =========================================================
+
+    match /parentStudents/{relationshipId} {
+
+      // Admin
+      allow read: if isAdmin();
+
+      // Parent → own relationships
+      allow read: if isParent()
+        && resource.data.parentId == request.auth.uid;
+
+      // Teacher can read relationships if needed.
+      allow read: if isTeacher();
+
+      // Only Admin manages relationships.
+      allow create, update, delete: if isAdmin();
+    }
+
+
+    // =========================================================
+    // STUDENT ↔ SUBJECT
+    //
+    // studentSubjects/{studentUID}_{subjectId}
+    // =========================================================
+
+    match /studentSubjects/{studentSubjectId} {
+
+      // Admin
+      allow read: if isAdmin();
+
+      // Student → own subjects
+      allow read: if isStudent()
+        && resource.data.studentId == request.auth.uid;
+
+      // Parent → linked child's subjects
+      allow read: if isParentOf(resource.data.studentId);
+
+      // Teacher → can read subject memberships.
+      allow read: if isTeacher();
+
+      // Only Admin manages student subjects.
+      allow create, update, delete: if isAdmin();
+    }
+
+
+    // =========================================================
+    // LESSONS
+    // =========================================================
+
+    match /lessons/{lessonId} {
+
+      // Admin
+      allow read: if isAdmin();
+
+      // Teacher → own lessons
+      allow read: if isTeacher()
+        && resource.data.teacherId == request.auth.uid;
+
+      // Active Student/Parent → active lessons
+      allow read: if isActiveUser()
+        && (
+          isStudent()
+          || isParent()
+        )
+        && resource.data.active == true;
+
+
+      // Teacher creates own lesson.
+      allow create: if isAdmin()
+        || (
+          isTeacher()
+          && request.resource.data.teacherId == request.auth.uid
+          && teacherHasSubject(request.resource.data.subjectId)
+        );
+
+      // Teacher updates own lesson.
+      allow update: if isAdmin()
+        || (
+          isTeacher()
+          && resource.data.teacherId == request.auth.uid
+          && request.resource.data.teacherId == request.auth.uid
+          && teacherHasSubject(request.resource.data.subjectId)
+        );
+
+      // Teacher deletes own lesson.
+      allow delete: if isAdmin()
+        || (
+          isTeacher()
+          && resource.data.teacherId == request.auth.uid
+        );
+    }
+
+
+    // =========================================================
+    // QUIZZES
+    // =========================================================
+
+    match /quizzes/{quizId} {
+
+      // Admin
+      allow read: if isAdmin();
+
+      // Teacher → own quizzes
+      allow read: if isTeacher()
+        && resource.data.teacherId == request.auth.uid;
+
+      // Student/Parent → published quizzes
+      allow read: if isActiveUser()
+        && (
+          isStudent()
+          || isParent()
+        )
+        && resource.data.status == "published";
+
+
+      // Teacher creates own quiz
+      // and must teach its subject.
+      allow create: if isAdmin()
+        || (
+          isTeacher()
+          && request.resource.data.teacherId == request.auth.uid
+          && teacherHasSubject(request.resource.data.subjectId)
+        );
+
+
+      // Teacher updates own quiz.
+      allow update: if isAdmin()
+        || (
+          isTeacher()
+          && resource.data.teacherId == request.auth.uid
+          && request.resource.data.teacherId == request.auth.uid
+          && teacherHasSubject(request.resource.data.subjectId)
+        );
+
+
+      // Teacher deletes own quiz.
+      allow delete: if isAdmin()
+        || (
+          isTeacher()
+          && resource.data.teacherId == request.auth.uid
+        );
+    }
+
+
+// =========================================================
+// QUIZ ↔ CLASS
+//
+// quizClasses/{quizId}_{classId}
+// =========================================================
+
+match /quizClasses/{quizClassId} {
+
+  // Admin
+  allow read: if isAdmin();
+
+  // Teacher → own quiz assignments
+  allow read: if isTeacher()
+    && exists(
+      /databases/$(database)/documents/quizzes/
+      $(resource.data.quizId)
+    )
+    && get(
+      /databases/$(database)/documents/quizzes/
+      $(resource.data.quizId)
+    ).data.teacherId == request.auth.uid;
+
+  // Parent → published quiz-class mappings
+  allow read: if isActiveUser()
+    && isParent()
+    ;
+
+  // Student → quiz-class mappings for own class
+  allow read: if isActiveUser()
+    && isStudent()
+    && resource.data.classId ==
+      get(
+        /databases/$(database)/documents/students/
+        $(request.auth.uid)
+      ).data.classId;
+
+  // Admin or teacher who owns the quiz
+  allow create: if isAdmin()
+    || (
+      isTeacher()
+      && request.resource.data.teacherId == request.auth.uid
+      && request.resource.data.subjectId != null
+      && getAfter(
+        /databases/$(database)/documents/quizzes/
+        $(request.resource.data.quizId)
+      ).data.teacherId == request.auth.uid
+      && getAfter(
+        /databases/$(database)/documents/quizzes/
+        $(request.resource.data.quizId)
+      ).data.subjectId == request.resource.data.subjectId
+      && teacherHasAssignment(
+        request.resource.data.classId,
+        request.resource.data.subjectId
+      )
+    );
+
+  // Admin or teacher who owns the quiz
+  allow update: if isAdmin()
+    || (
+      isTeacher()
+      && exists(
+        /databases/$(database)/documents/quizzes/
+        $(resource.data.quizId)
+      )
+      && get(
+        /databases/$(database)/documents/quizzes/
+        $(resource.data.quizId)
+      ).data.teacherId == request.auth.uid
+    );
+
+  // Admin or teacher who owns the quiz
+  allow delete: if isAdmin()
+    || (
+      isTeacher()
+      && exists(
+        /databases/$(database)/documents/quizzes/
+        $(resource.data.quizId)
+      )
+      && get(
+        /databases/$(database)/documents/quizzes/
+        $(resource.data.quizId)
+      ).data.teacherId == request.auth.uid
+    );
+}
+
+    // =========================================================
+    // QUESTIONS
+    // =========================================================
+
+    match /questions/{questionId} {
+
+      // Admin
+      allow read: if isAdmin();
+
+      // Teacher → own questions
+      allow read: if isTeacher()
+        && resource.data.teacherId == request.auth.uid;
+
+      // Students may read questions only through the app
+      // after accessing a published quiz.
+      //
+      // We deliberately do NOT expose questionKeys.
+      allow read: if isStudent()
+        && resource.data.subjectId != null;
+
+
+      // Teacher creates own question
+      // and must teach that subject.
+      allow create: if isAdmin()
+        || (
+          isTeacher()
+          && request.resource.data.teacherId == request.auth.uid
+          && teacherHasSubject(request.resource.data.subjectId)
+        );
+
+
+      // Teacher updates own question.
+      allow update: if isAdmin()
+        || (
+          isTeacher()
+          && resource.data.teacherId == request.auth.uid
+          && request.resource.data.teacherId == request.auth.uid
+          && teacherHasSubject(request.resource.data.subjectId)
+        );
+
+
+      // Teacher deletes own question.
+      allow delete: if isAdmin()
+        || (
+          isTeacher()
+          && resource.data.teacherId == request.auth.uid
+        );
+    }
+
+
+    // =========================================================
+    // QUIZ ↔ QUESTION
+    //
+    // quizQuestions/{quizId}_{questionId}
+    // =========================================================
+
+    match /quizQuestions/{quizQuestionId} {
+
+      // Admin
+      allow read: if isAdmin();
+
+      // Teacher → own quiz
+      allow read: if isTeacher()
+        && exists(
+          /databases/$(database)/documents/quizzes/
+          $(resource.data.quizId)
+        )
+        && get(
+          /databases/$(database)/documents/quizzes/
+          $(resource.data.quizId)
+        ).data.teacherId == request.auth.uid;
+
+      // Student/Parent → published quiz
+allow read: if isActiveUser()
+  && (
+    isStudent()
+    || isParent()
+  )
+  && resource.data.status == "published";
+
+
+      // Teacher manages own quiz questions.
+      allow create: if isAdmin()
+        || (
+          isTeacher()
+          && exists(
+            /databases/$(database)/documents/quizzes/
+            $(request.resource.data.quizId)
+          )
+          && get(
+            /databases/$(database)/documents/quizzes/
+            $(request.resource.data.quizId)
+          ).data.teacherId == request.auth.uid
+        );
+
+
+      allow update: if isAdmin()
+        || (
+          isTeacher()
+          && exists(
+            /databases/$(database)/documents/quizzes/
+            $(resource.data.quizId)
+          )
+          && get(
+            /databases/$(database)/documents/quizzes/
+            $(resource.data.quizId)
+          ).data.teacherId == request.auth.uid
+        );
+
+
+      allow delete: if isAdmin()
+        || (
+          isTeacher()
+          && exists(
+            /databases/$(database)/documents/quizzes/
+            $(resource.data.quizId)
+          )
+          && get(
+            /databases/$(database)/documents/quizzes/
+            $(resource.data.quizId)
+          ).data.teacherId == request.auth.uid
+        );
+    }
+
+
+    // =========================================================
+    // QUESTION KEYS
+    //
+    // questionKeys/{questionId}
+    //
+    // NEVER readable by Student or Parent.
+    // =========================================================
+
+    match /questionKeys/{questionId} {
+
+      // Admin
+      allow read: if isAdmin();
+
+      // Teacher → only his question's key.
+      allow read: if isTeacher()
+        && exists(
+          /databases/$(database)/documents/questions/
+          $(questionId)
+        )
+        && get(
+          /databases/$(database)/documents/questions/
+          $(questionId)
+        ).data.teacherId == request.auth.uid;
+
+
+      // Teacher creates key for his own question.
+      allow create: if isAdmin()
+        || (
+          isTeacher()
+          && getAfter(
+            /databases/$(database)/documents/questions/
+            $(questionId)
+          ).data.teacherId == request.auth.uid
+        );
+
+
+      // Teacher updates his own question key.
+      allow update: if isAdmin()
+        || (
+          isTeacher()
+          && exists(
+            /databases/$(database)/documents/questions/
+            $(questionId)
+          )
+          && get(
+            /databases/$(database)/documents/questions/
+            $(questionId)
+          ).data.teacherId == request.auth.uid
+        );
+
+
+      // Teacher deletes his own key.
+      allow delete: if isAdmin()
+        || (
+          isTeacher()
+          && exists(
+            /databases/$(database)/documents/questions/
+            $(questionId)
+          )
+          && get(
+            /databases/$(database)/documents/questions/
+            $(questionId)
+          ).data.teacherId == request.auth.uid
+        );
+    }
+
+
+    // =========================================================
+    // ATTEMPTS
+    // =========================================================
+
+    match /attempts/{attemptId} {
+
+      // Admin / Teacher
+      allow read: if isAdmin() || isTeacher();
+
+      // Student → own attempts only.
+      allow read: if isStudent()
+        && resource.data.studentId == request.auth.uid;
+
+
+      // Student creates own attempt.
+      allow create: if isStudent()
+        && request.resource.data.studentId == request.auth.uid;
+
+
+      // Student updates own attempt.
+      allow update: if isStudent()
+        && resource.data.studentId == request.auth.uid
+        && request.resource.data.studentId == request.auth.uid;
+
+
+      // Only Admin can delete.
+      allow delete: if isAdmin();
+    }
+
+
+    // =========================================================
+    // ANSWERS
+    // =========================================================
+
+    match /answers/{answerId} {
+
+      // Admin / Teacher
+      allow read: if isAdmin() || isTeacher();
+
+      // Student → own answers only.
+      allow read: if isStudent()
+        && resource.data.studentId == request.auth.uid;
+
+
+      // Student creates own answer.
+      allow create: if isStudent()
+        && request.resource.data.studentId == request.auth.uid;
+
+
+      // Student updates own answer.
+      allow update: if isStudent()
+        && resource.data.studentId == request.auth.uid
+        && request.resource.data.studentId == request.auth.uid;
+
+
+      // Only Admin can delete.
+      allow delete: if isAdmin();
+    }
+
+
+    // =========================================================
+    // RESULTS
+    // =========================================================
+
+match /results/{resultId} {
+  // Admin
+  allow read, create, update, delete: if isAdmin();
+
+  // Student can read his own result
+  allow read: if isActiveUser()
+    && isStudent()
+    && resource.data.studentId == request.auth.uid;
+
+  // Parent can read results of linked students
+  allow read: if isActiveUser()
+    && isParent()
+    && isParentOf(resource.data.studentId);
+
+  // Teacher can read results of quizzes that belong to him
+  allow read: if isActiveUser()
+    && isTeacher()
+    && resource.data.teacherId == request.auth.uid;
+
+  // Teacher can create a result for his own quiz
+  allow create: if isActiveUser()
+    && isTeacher()
+    && request.resource.data.teacherId == request.auth.uid
+    && exists(
+      /databases/$(database)/documents/quizzes/
+      $(request.resource.data.quizId)
+    )
+    && get(
+      /databases/$(database)/documents/quizzes/
+      $(request.resource.data.quizId)
+    ).data.teacherId == request.auth.uid;
+
+  // Teacher can update grading/publishing fields
+  allow update: if isActiveUser()
+    && isTeacher()
+    && resource.data.teacherId == request.auth.uid
+    && request.resource.data.teacherId == resource.data.teacherId
+    && request.resource.data.quizId == resource.data.quizId
+    && request.resource.data.studentId == resource.data.studentId
+    && request.resource.data.attemptId == resource.data.attemptId;
+
+  // No delete for teachers
+}
+
+    // =========================================================
+    // DEFAULT DENY
+    // =========================================================
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
