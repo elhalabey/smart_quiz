@@ -2,6 +2,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 
 import '../../../../core/session/session_manager.dart';
+import '../questions/result_print_service.dart';
 
 class TeacherResultsScreen extends StatefulWidget {
   final SessionManager sessionManager;
@@ -107,17 +108,37 @@ class _TeacherResultsScreenState extends State<TeacherResultsScreen> {
       throw Exception('لم يتم العثور على جلسة المعلم.');
     }
 
-    final snapshot = await _firestore
+    // The result document is created lazily in some flows (for example when
+    // the teacher first opens the quiz results). The teacher dashboard must
+    // still show a submitted attempt immediately, so count submitted attempts
+    // as the source of truth and use results only for publication status.
+    final attemptsSnapshot = await _firestore
+        .collection('attempts')
+        .where('quizId', isEqualTo: quizId)
+        .where('status', isEqualTo: 'submitted')
+        .get();
+
+    final resultsSnapshot = await _firestore
         .collection('results')
         .where('teacherId', isEqualTo: teacherId)
         .where('quizId', isEqualTo: quizId)
         .get();
 
+    final resultByAttemptId = <String, String>{};
+    for (final doc in resultsSnapshot.docs) {
+      final data = doc.data();
+      final attemptId = data['attemptId']?.toString() ?? doc.id;
+      if (attemptId.isNotEmpty) {
+        resultByAttemptId[attemptId] =
+            data['status']?.toString() ?? 'pending';
+      }
+    }
+
     var published = 0;
     var pending = 0;
 
-    for (final doc in snapshot.docs) {
-      final status = doc.data()['status']?.toString() ?? '';
+    for (final attemptDoc in attemptsSnapshot.docs) {
+      final status = resultByAttemptId[attemptDoc.id];
 
       if (status == 'published') {
         published++;
@@ -127,7 +148,7 @@ class _TeacherResultsScreenState extends State<TeacherResultsScreen> {
     }
 
     return _ResultSummary(
-      total: snapshot.docs.length,
+      total: attemptsSnapshot.docs.length,
       published: published,
       pending: pending,
     );
@@ -536,9 +557,24 @@ class _TeacherQuizResultsScreenState
       }
 
       if (existingResult != null) {
-        // نعيد حساب النتيجة بالكامل للنتائج القديمة أيضًا.
-        // هذا مهم إذا كانت النتيجة أُنشئت قبل دعم التصحيح
-        // التلقائي لسؤال الترتيب أو قبل إضافة questionScores.
+        final existingQuestionScores = existingResult['questionScores'];
+
+        if (existingQuestionScores is Map &&
+            existingQuestionScores.isNotEmpty) {
+          // النتيجة موجودة بالفعل بدرجات الأسئلة؛ لا نعيد حسابها.
+          // لكن نضيف مفتاح الإجابات الآمنة إذا كانت النتيجة قديمة.
+          // Always backfill missing correct answers. Older results may have
+          // a partial/empty correctAnswers map from before this feature.
+          await _backfillQuestionScores(
+            attemptId: attemptDoc.id,
+            studentId: studentId,
+            resultData: existingResult,
+          );
+          continue;
+        }
+
+        // النتيجة القديمة موجودة، لذلك نضيف questionScores فقط
+        // مع الحفاظ على manualScores والدرجات الحالية.
         await _backfillQuestionScores(
           attemptId: attemptDoc.id,
           studentId: studentId,
@@ -603,18 +639,28 @@ class _TeacherQuizResultsScreenState
     }
 
     final questionScores = <String, dynamic>{};
+    final correctAnswers = resultData['correctAnswers'] is Map
+        ? Map<String, dynamic>.from(
+            resultData['correctAnswers'] as Map,
+          )
+        : <String, dynamic>{};
+    final existingQuestionScores = resultData['questionScores'];
+
+    if (existingQuestionScores is Map) {
+      for (final entry in existingQuestionScores.entries) {
+        questionScores[entry.key.toString()] = entry.value;
+      }
+    }
+
     final manualScores = resultData['manualScores'] is Map
         ? Map<String, dynamic>.from(
             resultData['manualScores'] as Map,
           )
         : <String, dynamic>{};
 
-    double autoScore = 0;
-    double manualScore = 0;
-    double maxScore = 0;
-    var hasPendingManualQuestions = false;
-
     for (final link in links) {
+      final hasExistingScore = questionScores.containsKey(link.questionId);
+
       final questionDoc = await _firestore
           .collection('questions')
           .doc(link.questionId)
@@ -631,20 +677,23 @@ class _TeacherQuizResultsScreenState
 
       final type = questionData['type']?.toString() ?? '';
       final score = _readDouble(questionData['score']) ?? 0;
-
-      maxScore += score;
-
       final studentAnswer = answersByQuestion[link.questionId];
 
-      // الـ Essay فقط يحتاج تصحيحًا يدويًا.
-      if (type == 'essay') {
-        if (manualScores.containsKey(link.questionId)) {
-          final earned =
-              _readDouble(manualScores[link.questionId]) ?? 0;
-          questionScores[link.questionId] = earned;
-          manualScore += earned;
-        } else {
-          hasPendingManualQuestions = true;
+      // الأسئلة اليدوية لا نعيد حسابها هنا؛ نستخدم الدرجة المحفوظة.
+      if (type == 'essay' || type == 'ordering') {
+        if (!hasExistingScore &&
+            manualScores.containsKey(link.questionId)) {
+          questionScores[link.questionId] =
+              manualScores[link.questionId];
+        }
+        final keyDoc = await _firestore
+            .collection('questionKeys')
+            .doc(link.questionId)
+            .get();
+        final keyData = keyDoc.data();
+        if (keyData != null) {
+          correctAnswers[link.questionId] =
+              _displayCorrectAnswer(type, keyData, questionData);
         }
         continue;
       }
@@ -655,15 +704,12 @@ class _TeacherQuizResultsScreenState
           .get();
 
       final keyData = keyDoc.data();
-
       if (keyData == null) {
-        // سؤال قابل للتصحيح تلقائيًا لكن مفتاحه غير موجود،
-        // لذلك لا ننشر النتيجة.
-        hasPendingManualQuestions = true;
         continue;
       }
 
-      double earned = 0;
+      correctAnswers[link.questionId] =
+          _displayCorrectAnswer(type, keyData, questionData);
 
       if (type == 'single_choice') {
         final correct = _readInt(keyData['correctOption']);
@@ -672,46 +718,47 @@ class _TeacherQuizResultsScreenState
           questionData['options'],
         );
 
-        earned = correct != null &&
-                answerIndex != null &&
-                correct == answerIndex
-            ? score
-            : 0.0;
-      } else if (type == 'true_false') {
-        final correct = _readInt(keyData['correctOption']);
+        // Always recalculate automatically graded questions. Older results
+        // may contain an incorrect cached score (for example 0/1 even when
+        // the student answered صح and the correctOption is 0).
+        questionScores[link.questionId] =
+            correct != null &&
+                    answerIndex != null &&
+                    correct == answerIndex
+                ? score
+                : 0.0;
+        continue;
+      }
+
+      if (_isTrueFalseType(type)) {
+        final correct = _trueFalseAnswerIndex(keyData['correctOption']);
         final answerIndex = _trueFalseAnswerIndex(studentAnswer);
 
-        earned = correct != null &&
-                answerIndex != null &&
-                correct == answerIndex
-            ? score
-            : 0.0;
-      } else if (type == 'multiple_choice') {
+        // true_false answers are normalized to the option index: 0=صح,
+        // 1=خطأ. This also repairs previously cached 0 scores.
+        questionScores[link.questionId] =
+            correct != null &&
+                    answerIndex != null &&
+                    correct == answerIndex
+                ? score
+                : 0.0;
+        continue;
+      }
+
+      if (type == 'multiple_choice') {
         final correct = _readIntList(keyData['correctOptions']);
         final answer = _answerIndexList(
           studentAnswer,
           questionData['options'],
         );
 
-        earned = _sameIntSet(correct, answer) ? score : 0.0;
-      } else if (type == 'ordering') {
-        final correctOrder = _readOrderingCorrectOrder(
-          keyData['correctOrder'],
-          questionData['options'],
-        );
-        final answerOrder = _readStringList(studentAnswer);
-
-        earned = correctOrder.isNotEmpty &&
-                _sameStringList(correctOrder, answerOrder)
-            ? score
-            : 0.0;
-      } else {
-        hasPendingManualQuestions = true;
-        continue;
+        questionScores[link.questionId] =
+            _sameIntSet(correct, answer) ? score : 0.0;
       }
+    }
 
-      questionScores[link.questionId] = earned;
-      autoScore += earned;
+    if (questionScores.isEmpty && correctAnswers.isEmpty) {
+      return;
     }
 
     final resultId = resultData['_resultId']?.toString();
@@ -719,21 +766,33 @@ class _TeacherQuizResultsScreenState
       return;
     }
 
-    final now = Timestamp.now();
-    final published = !hasPendingManualQuestions;
+    // Rebuild the automatic total from the refreshed per-question scores.
+    // Keep manually graded scores untouched.
+    double autoScore = 0.0;
+    for (final link in links) {
+      final questionDoc = await _firestore
+          .collection('questions')
+          .doc(link.questionId)
+          .get();
+      final data = questionDoc.data();
+      if (data == null) continue;
+      final type = data['type']?.toString() ?? '';
+      if (type == 'essay' || type == 'ordering') continue;
+      autoScore += _readDouble(questionScores[link.questionId]) ?? 0.0;
+    }
+
+    final manualScore = _readDouble(resultData['manualScore']) ?? 0.0;
+    final totalScore = autoScore + manualScore;
 
     await _firestore
         .collection('results')
         .doc(resultId)
         .update({
-      'autoScore': autoScore,
-      'manualScore': manualScore,
-      'totalScore': autoScore + manualScore,
-      'maxScore': maxScore,
       'questionScores': questionScores,
-      'status': published ? 'published' : 'pending',
-      'publishedAt': published ? now : null,
-      'updatedAt': now,
+      'correctAnswers': correctAnswers,
+      'autoScore': autoScore,
+      'totalScore': totalScore,
+      'updatedAt': Timestamp.now(),
     });
   }
 
@@ -790,6 +849,7 @@ class _TeacherQuizResultsScreenState
     // درجات كل سؤال بشكل آمن للعرض للطالب لاحقًا.
     // لا تحتوي على الإجابات الصحيحة أو questionKeys.
     final questionScores = <String, double>{};
+    final correctAnswers = <String, dynamic>{};
 
     for (final link in links) {
       final questionDoc = await _firestore
@@ -825,6 +885,11 @@ class _TeacherQuizResultsScreenState
 
       final keyData = keyDoc.data();
 
+      if (keyData != null) {
+        correctAnswers[link.questionId] =
+            _displayCorrectAnswer(type, keyData, questionData);
+      }
+
       if (type == 'single_choice') {
         if (keyData == null) {
           hasManualQuestions = true;
@@ -851,14 +916,15 @@ class _TeacherQuizResultsScreenState
         continue;
       }
 
-      if (type == 'true_false') {
+      if (_isTrueFalseType(type)) {
         if (keyData == null) {
           hasManualQuestions = true;
           continue;
         }
 
-        final correct =
-            _readInt(keyData['correctOption']);
+        final correct = _trueFalseAnswerIndex(
+          keyData['correctOption'],
+        );
 
         final answerIndex = _trueFalseAnswerIndex(
           studentAnswer,
@@ -899,27 +965,6 @@ class _TeacherQuizResultsScreenState
         continue;
       }
 
-      if (type == 'ordering') {
-        if (keyData == null) {
-          hasManualQuestions = true;
-          continue;
-        }
-
-        final correctOrder =
-            _readStringList(keyData['correctOrder']);
-        final answerOrder = _readStringList(studentAnswer);
-
-        final earned = correctOrder.isNotEmpty &&
-                _sameStringList(correctOrder, answerOrder)
-            ? score
-            : 0.0;
-
-        questionScores[link.questionId] = earned;
-        autoScore += earned;
-
-        continue;
-      }
-
       hasManualQuestions = true;
       questionScores[link.questionId] = 0.0;
     }
@@ -936,6 +981,7 @@ class _TeacherQuizResultsScreenState
       'totalScore': autoScore,
       'maxScore': maxScore,
       'questionScores': questionScores,
+      'correctAnswers': correctAnswers,
       'status':
           hasManualQuestions ? 'pending' : 'published',
       'publishedAt':
@@ -943,6 +989,60 @@ class _TeacherQuizResultsScreenState
       'createdAt': now,
       'updatedAt': now,
     };
+  }
+
+  String _displayCorrectAnswer(
+    String type,
+    Map<String, dynamic> keyData,
+    Map<String, dynamic> questionData,
+  ) {
+    final options = _readStringList(questionData['options']);
+
+    if (type == 'single_choice' || _isTrueFalseType(type)) {
+      final index = _trueFalseAnswerIndex(keyData['correctOption']);
+      if (_isTrueFalseType(type)) {
+        if (index == 0) return 'صح';
+        if (index == 1) return 'خطأ';
+      }
+      if (index != null && index >= 0 && index < options.length) {
+        return options[index];
+      }
+    }
+
+    if (type == 'multiple_choice') {
+      final indexes = _readIntList(keyData['correctOptions']);
+      final values = indexes
+          .where((index) => index >= 0 && index < options.length)
+          .map((index) => options[index])
+          .toList();
+      return values.join('\n');
+    }
+
+    if (type == 'ordering') {
+      final order = _readIntList(keyData['correctOrder']);
+      if (order.isNotEmpty) {
+        final values = order
+            .where((index) => index >= 0 && index < options.length)
+            .map((index) => options[index])
+            .toList();
+        if (values.isNotEmpty) {
+          return values.join(' ← ');
+        }
+      }
+
+      final model = keyData['modelAnswer'] ?? questionData['modelAnswer'];
+      if (model is Iterable) {
+        return model
+            .map((e) => e?.toString() ?? '')
+            .where((e) => e.isNotEmpty)
+            .join(' ← ');
+      }
+      return model?.toString() ?? 'غير متاحة';
+    }
+
+    return keyData['modelAnswer']?.toString() ??
+        questionData['modelAnswer']?.toString() ??
+        'تصحيح يدوي';
   }
 
   Widget _buildResultCard(StudentResult result) {
@@ -1218,28 +1318,29 @@ class _TeacherQuizResultsScreenState
     return null;
   }
 
+  static bool _isTrueFalseType(String type) {
+    final value = type.trim().toLowerCase().replaceAll(' ', '');
+    return value == 'true_false' ||
+        value == 'true/false' ||
+        value == 'truefalse' ||
+        value == 'صح/خطأ' ||
+        value == 'صح/خطا' ||
+        value == 'صحخطأ' ||
+        value == 'صحخطا';
+  }
+
   static int? _trueFalseAnswerIndex(dynamic answer) {
-    if (answer is bool) {
-      return answer ? 0 : 1;
-    }
+    if (answer is bool) return answer ? 0 : 1;
 
     if (answer is num) {
       final index = answer.toInt();
-      if (index == 0 || index == 1) {
-        return index;
-      }
+      if (index == 0 || index == 1) return index;
     }
 
     if (answer is String) {
-      final value = answer.trim().toLowerCase();
-
-      if (value == '0' || value == 'true' || value == 'صح') {
-        return 0;
-      }
-
-      if (value == '1' || value == 'false' || value == 'خطأ') {
-        return 1;
-      }
+      final value = answer.trim().toLowerCase().replaceAll(' ', '');
+      if (value == '0' || value == 'true' || value == 'صح') return 0;
+      if (value == '1' || value == 'false' || value == 'خطأ' || value == 'خطا') return 1;
     }
 
     return null;
@@ -1260,65 +1361,6 @@ class _TeacherQuizResultsScreenState
         )
         .whereType<int>()
         .toList();
-  }
-
-  static List<String> _readOrderingCorrectOrder(
-    dynamic value,
-    dynamic optionsValue,
-  ) {
-    final options = _readStringList(optionsValue);
-
-    if (value is! Iterable) {
-      return _readStringList(value);
-    }
-
-    final items = value.toList();
-
-    // questionKeys for Ordering currently stores option indexes.
-    // Convert them to option text before comparing with the student's
-    // stored answer, which is a list of option strings.
-    if (items.isNotEmpty &&
-        items.every((item) {
-          if (item is num) {
-            return true;
-          }
-          return int.tryParse(item?.toString() ?? '') != null;
-        })) {
-      final indexes = items
-          .map((item) => item is num
-              ? item.toInt()
-              : int.tryParse(item.toString()))
-          .whereType<int>()
-          .toList();
-
-      if (indexes.length == items.length &&
-          indexes.every(
-            (index) => index >= 0 && index < options.length,
-          )) {
-        return indexes.map((index) => options[index]).toList();
-      }
-    }
-
-    return items
-        .map((item) => item?.toString() ?? '')
-        .toList();
-  }
-
-  static bool _sameStringList(
-    List<String> first,
-    List<String> second,
-  ) {
-    if (first.length != second.length) {
-      return false;
-    }
-
-    for (var i = 0; i < first.length; i++) {
-      if (first[i].trim() != second[i].trim()) {
-        return false;
-      }
-    }
-
-    return true;
   }
 
   static bool _sameIntSet(
@@ -1360,11 +1402,6 @@ class _TeacherStudentResultScreenState
   String? _errorMessage;
   List<_ManualQuestion> _manualQuestions = [];
   final Map<String, TextEditingController> _scoreControllers = {};
-
-  double _currentAutoScore = 0;
-  double _currentManualScore = 0;
-  double _currentTotalScore = 0;
-  double _currentMaxScore = 0;
 
   @override
   void initState() {
@@ -1416,16 +1453,6 @@ class _TeacherStudentResultScreenState
           .doc(widget.result.id)
           .get();
       final resultData = resultDoc.data() ?? <String, dynamic>{};
-
-      final refreshedAutoScore =
-          _readDouble(resultData['autoScore']) ?? widget.result.autoScore;
-      final refreshedManualScore =
-          _readDouble(resultData['manualScore']) ?? widget.result.manualScore;
-      final refreshedTotalScore =
-          _readDouble(resultData['totalScore']) ?? widget.result.totalScore;
-      final refreshedMaxScore =
-          _readDouble(resultData['maxScore']) ?? widget.result.maxScore;
-
       final savedManualScores = resultData['manualScores'] is Map
           ? Map<String, dynamic>.from(resultData['manualScores'] as Map)
           : <String, dynamic>{};
@@ -1474,7 +1501,7 @@ class _TeacherStudentResultScreenState
         }
 
         final type = questionData['type']?.toString() ?? '';
-        if (type != 'essay') {
+        if (type != 'essay' && type != 'ordering') {
           continue;
         }
 
@@ -1510,10 +1537,6 @@ class _TeacherStudentResultScreenState
       if (!mounted) return;
       setState(() {
         _manualQuestions = manualQuestions;
-        _currentAutoScore = refreshedAutoScore;
-        _currentManualScore = refreshedManualScore;
-        _currentTotalScore = refreshedTotalScore;
-        _currentMaxScore = refreshedMaxScore;
         _loading = false;
       });
     } on FirebaseException catch (e) {
@@ -1529,6 +1552,299 @@ class _TeacherStudentResultScreenState
         _loading = false;
         _errorMessage = e.toString().replaceFirst('Exception: ', '');
       });
+    }
+  }
+
+  Future<void> _printStudentResult() async {
+    if (_loading || _saving) return;
+
+    try {
+      final teacherId = widget.sessionManager.currentSession?.uid;
+      if (teacherId == null) throw Exception('لم يتم العثور على جلسة المعلم.');
+
+      final quizDoc = await _firestore.collection('quizzes').doc(widget.quizId).get();
+      final quizData = quizDoc.data();
+      if (!quizDoc.exists || quizData == null || quizData['teacherId']?.toString() != teacherId) {
+        throw Exception('لا تملك صلاحية طباعة هذه النتيجة.');
+      }
+
+      final resultDoc = await _firestore.collection('results').doc(widget.result.id).get();
+      final resultData = resultDoc.data() ?? <String, dynamic>{};
+      final questionScores = resultData['questionScores'] is Map
+          ? Map<String, dynamic>.from(resultData['questionScores'] as Map)
+          : <String, dynamic>{};
+      final manualScores = resultData['manualScores'] is Map
+          ? Map<String, dynamic>.from(resultData['manualScores'] as Map)
+          : <String, dynamic>{};
+
+      final linksSnapshot = await _firestore.collection('quizQuestions').where('quizId', isEqualTo: widget.quizId).get();
+      final links = linksSnapshot.docs.map((doc) {
+        final data = doc.data();
+        return _QuestionLink(questionId: data['questionId']?.toString() ?? '', order: _readInt(data['order']) ?? 0);
+      }).where((item) => item.questionId.isNotEmpty).toList()
+        ..sort((a, b) => a.order.compareTo(b.order));
+
+      final answersSnapshot = await _firestore.collection('answers')
+          .where('attemptId', isEqualTo: widget.result.attemptId)
+          .where('studentId', isEqualTo: widget.result.studentId)
+          .get();
+      final answersByQuestion = <String, dynamic>{};
+      for (final doc in answersSnapshot.docs) {
+        final data = doc.data();
+        final id = data['questionId']?.toString() ?? '';
+        if (id.isNotEmpty) answersByQuestion[id] = data['answer'];
+      }
+
+      final questions = <ResultPrintQuestion>[];
+      for (final link in links) {
+        final questionDoc = await _firestore.collection('questions').doc(link.questionId).get();
+        final questionData = questionDoc.data();
+        if (!questionDoc.exists || questionData == null) continue;
+
+        final type = questionData['type']?.toString() ?? '';
+        final options = _readStringList(questionData['options']);
+        final studentAnswer = answersByQuestion[link.questionId];
+        final keyDoc = await _firestore.collection('questionKeys').doc(link.questionId).get();
+        final keyData = keyDoc.data();
+        final score = _readDouble(questionData['score']) ?? 0;
+        final earned = _readDouble(questionScores[link.questionId]) ??
+            _readDouble(manualScores[link.questionId]) ?? 0;
+
+        questions.add(ResultPrintQuestion(
+          number: link.order,
+          text: questionData['text']?.toString() ?? '',
+          type: type,
+          studentAnswer: _formatStudentAnswer(type, studentAnswer, options),
+          correctAnswer: _formatCorrectAnswer(type, keyData, options, questionData),
+          score: score,
+          earnedScore: earned,
+        ));
+      }
+
+      if (questions.isEmpty) throw Exception('لا توجد أسئلة متاحة للطباعة.');
+
+      await printStudentResult(
+        quizTitle: widget.quizTitle,
+        studentName: widget.result.studentName,
+        totalScore: widget.result.totalScore,
+        maxScore: widget.result.maxScore,
+        autoScore: widget.result.autoScore,
+        manualScore: widget.result.manualScore,
+        status: widget.result.status,
+        questions: questions,
+      );
+    } catch (error) {
+      if (!mounted) return;
+      _showMessage('تعذر طباعة نتيجة الطالب:\n${error.toString().replaceFirst('Exception: ', '')}');
+    }
+  }
+
+  static String _formatStudentAnswer(String type, dynamic answer, List<String> options) {
+    if (answer == null) return 'لم يجب الطالب';
+    if (_isTrueFalseType(type)) {
+      final index = _trueFalseAnswerIndex(answer);
+      if (index == 0) return 'صح';
+      if (index == 1) return 'خطأ';
+    }
+    if (answer is Iterable) {
+      final values = answer.map((item) {
+        final index = _answerIndex(item, options);
+        return index != null && index >= 0 && index < options.length ? options[index] : item?.toString() ?? '';
+      }).where((v) => v.isNotEmpty).toList();
+      return values.isEmpty ? 'لم يجب الطالب' : values.join(' ، ');
+    }
+    final index = _answerIndex(answer, options);
+    if (index != null && index >= 0 && index < options.length) return options[index];
+    final value = answer.toString().trim();
+    return value.isEmpty ? 'لم يجب الطالب' : value;
+  }
+
+  static String _formatCorrectAnswer(String type, Map<String, dynamic>? keyData, List<String> options, Map<String, dynamic> questionData) {
+    if (keyData == null) return type == 'essay' ? (questionData['modelAnswer']?.toString() ?? 'تصحيح يدوي') : 'غير متاحة';
+    if (type == 'single_choice') {
+      final index = _readInt(keyData['correctOption']);
+      return index != null && index >= 0 && index < options.length ? options[index] : 'غير متاحة';
+    }
+    if (type == 'multiple_choice') {
+      final indexes = _readIntList(keyData['correctOptions']);
+      final values = indexes.where((i) => i >= 0 && i < options.length).map((i) => options[i]).toList();
+      return values.isEmpty ? 'غير متاحة' : values.join(' ، ');
+    }
+    if (_isTrueFalseType(type)) {
+      final index = _readInt(keyData['correctOption']);
+      if (index == 0) return 'صح';
+      if (index == 1) return 'خطأ';
+      return 'غير متاحة';
+    }
+    if (type == 'essay') return keyData['modelAnswer']?.toString() ?? questionData['modelAnswer']?.toString() ?? 'تصحيح يدوي';
+    if (type == 'ordering') {
+      final model = keyData['modelAnswer'] ?? questionData['modelAnswer'];
+      if (model is Iterable) return model.map((e) => e?.toString() ?? '').where((e) => e.isNotEmpty).join(' ← ');
+      return model?.toString() ?? 'تصحيح يدوي';
+    }
+    return keyData['modelAnswer']?.toString() ?? 'غير متاحة';
+  }
+
+  String _displayCorrectAnswer(
+    String type,
+    Map<String, dynamic> keyData,
+    Map<String, dynamic> questionData,
+  ) {
+    final options = _readStringList(questionData['options']);
+
+    if (type == 'single_choice' || _isTrueFalseType(type)) {
+      final index = _trueFalseAnswerIndex(keyData['correctOption']);
+      if (_isTrueFalseType(type)) {
+        if (index == 0) return 'صح';
+        if (index == 1) return 'خطأ';
+      }
+      if (index != null && index >= 0 && index < options.length) {
+        return options[index];
+      }
+    }
+
+    if (type == 'multiple_choice') {
+      final indexes = _readIntList(keyData['correctOptions']);
+      return indexes
+          .where((index) => index >= 0 && index < options.length)
+          .map((index) => options[index])
+          .join('\n');
+    }
+
+    if (type == 'ordering') {
+      final order = _readIntList(keyData['correctOrder']);
+      if (order.isNotEmpty) {
+        final values = order
+            .where((index) => index >= 0 && index < options.length)
+            .map((index) => options[index])
+            .toList();
+        if (values.isNotEmpty) {
+          return values.join(' ← ');
+        }
+      }
+
+      final model = keyData['modelAnswer'] ?? questionData['modelAnswer'];
+      if (model is Iterable) {
+        return model
+            .map((e) => e?.toString() ?? '')
+            .where((e) => e.isNotEmpty)
+            .join(' ← ');
+      }
+      return model?.toString() ?? 'غير متاحة';
+    }
+
+    return keyData['modelAnswer']?.toString() ??
+        questionData['modelAnswer']?.toString() ??
+        'تصحيح يدوي';
+  }
+
+  Future<void> _republishResult() async {
+    if (_saving) return;
+
+    if (mounted) setState(() => _saving = true);
+
+    try {
+      final teacherId = widget.sessionManager.currentSession?.uid;
+      if (teacherId == null) {
+        throw Exception('لم يتم العثور على جلسة المعلم.');
+      }
+
+      final resultRef = _firestore.collection('results').doc(widget.result.id);
+      final resultSnapshot = await resultRef.get();
+      final resultData = resultSnapshot.data();
+      if (resultData == null) {
+        throw Exception('النتيجة غير موجودة.');
+      }
+
+      final manualScores = resultData['manualScores'] is Map
+          ? Map<String, dynamic>.from(resultData['manualScores'] as Map)
+          : <String, dynamic>{};
+
+      final linksSnapshot = await _firestore
+          .collection('quizQuestions')
+          .where('quizId', isEqualTo: widget.quizId)
+          .get();
+
+      var manualCount = 0;
+      var gradedManualCount = 0;
+      final correctAnswers = resultData['correctAnswers'] is Map
+          ? Map<String, dynamic>.from(resultData['correctAnswers'] as Map)
+          : <String, dynamic>{};
+
+      for (final linkDoc in linksSnapshot.docs) {
+        final linkData = linkDoc.data();
+        final questionId = linkData['questionId']?.toString() ?? '';
+        if (questionId.isEmpty) continue;
+
+        final questionDoc = await _firestore
+            .collection('questions')
+            .doc(questionId)
+            .get();
+        final questionData = questionDoc.data();
+        if (!questionDoc.exists || questionData == null) continue;
+
+        final type = questionData['type']?.toString() ?? '';
+        if (type == 'essay' || type == 'ordering') {
+          manualCount++;
+          if (manualScores.containsKey(questionId)) gradedManualCount++;
+        }
+
+        final keyDoc = await _firestore
+            .collection('questionKeys')
+            .doc(questionId)
+            .get();
+        final keyData = keyDoc.data();
+        if (keyData != null) {
+          correctAnswers[questionId] = _displayCorrectAnswer(
+            type,
+            keyData,
+            questionData,
+          );
+        }
+      }
+
+      if (manualCount > 0 && gradedManualCount < manualCount) {
+        throw Exception(
+          'لا يمكن نشر النتيجة قبل تصحيح جميع الأسئلة اليدوية.',
+        );
+      }
+
+      final questionScores = resultData['questionScores'] is Map
+          ? Map<String, dynamic>.from(resultData['questionScores'] as Map)
+          : <String, dynamic>{};
+
+      final autoScore = _readDouble(resultData['autoScore']) ?? 0;
+      final manualScore = manualScores.values.fold<double>(
+        0,
+        (total, value) => total + (_readDouble(value) ?? 0),
+      );
+      final totalScore = autoScore + manualScore;
+      final now = Timestamp.now();
+
+      await resultRef.update({
+        'teacherId': teacherId,
+        'autoScore': autoScore,
+        'manualScore': manualScore,
+        'totalScore': totalScore,
+        'questionScores': questionScores,
+        'manualScores': manualScores,
+        'correctAnswers': correctAnswers,
+        'status': 'published',
+        'publishedAt': now,
+        'updatedAt': now,
+      });
+
+      if (!mounted) return;
+      _showMessage('تم تحديث ونشر النتيجة بنجاح.');
+      Navigator.of(context).pop(true);
+    } on FirebaseException catch (e) {
+      if (!mounted) return;
+      _showMessage('حدث خطأ أثناء تحديث النتيجة: ${e.message ?? e.code}');
+    } catch (e) {
+      if (!mounted) return;
+      _showMessage(e.toString().replaceFirst('Exception: ', ''));
+    } finally {
+      if (mounted) setState(() => _saving = false);
     }
   }
 
@@ -1592,6 +1908,49 @@ class _TeacherStudentResultScreenState
         questionScores[entry.key] = entry.value;
       }
 
+      final correctAnswers = resultData['correctAnswers'] is Map
+          ? Map<String, dynamic>.from(
+              resultData['correctAnswers'] as Map,
+            )
+          : <String, dynamic>{};
+
+      // Older results may not have all display-safe correct answers copied
+      // into the result document yet. Fill every missing question key; never
+      // expose questionKeys to the student directly.
+      {
+        final linksSnapshot = await _firestore
+            .collection('quizQuestions')
+            .where('quizId', isEqualTo: widget.quizId)
+            .get();
+
+        for (final linkDoc in linksSnapshot.docs) {
+          final linkData = linkDoc.data();
+          final questionId = linkData['questionId']?.toString() ?? '';
+          if (questionId.isEmpty) continue;
+
+          final questionDoc = await _firestore
+              .collection('questions')
+              .doc(questionId)
+              .get();
+          final keyDoc = await _firestore
+              .collection('questionKeys')
+              .doc(questionId)
+              .get();
+          final questionData = questionDoc.data();
+          final keyData = keyDoc.data();
+          if (questionData == null || keyData == null) continue;
+
+          if (!correctAnswers.containsKey(questionId) ||
+              (correctAnswers[questionId]?.toString().trim().isEmpty ?? true)) {
+            correctAnswers[questionId] = _displayCorrectAnswer(
+              questionData['type']?.toString() ?? '',
+              keyData,
+              questionData,
+            );
+          }
+        }
+      }
+
       final now = Timestamp.now();
 
       await resultRef.update({
@@ -1600,6 +1959,7 @@ class _TeacherStudentResultScreenState
         'totalScore': totalScore,
         'maxScore': widget.result.maxScore,
         'questionScores': questionScores,
+        'correctAnswers': correctAnswers,
         'manualScores': scores,
         'status': allManualGraded ? 'published' : 'pending',
         'publishedAt': allManualGraded ? now : null,
@@ -1803,8 +2163,8 @@ class _TeacherStudentResultScreenState
       );
     }
 
-    final percentage = _currentMaxScore > 0
-        ? (_currentTotalScore / _currentMaxScore) * 100
+    final percentage = widget.result.maxScore > 0
+        ? (widget.result.totalScore / widget.result.maxScore) * 100
         : 0;
 
     return ListView(
@@ -1835,10 +2195,31 @@ class _TeacherStudentResultScreenState
           ),
         ),
         const SizedBox(height: 12),
+        SizedBox(
+          height: 52,
+          child: FilledButton.icon(
+            onPressed: _loading || _saving ? null : _republishResult,
+            icon: _saving
+                ? const SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.publish_outlined),
+            label: Text(
+              _saving
+                  ? 'جارٍ تحديث ونشر النتيجة...'
+                  : (widget.result.status == 'published'
+                      ? 'تحديث وإعادة نشر النتيجة'
+                      : 'نشر النتيجة'),
+            ),
+          ),
+        ),
+        const SizedBox(height: 12),
         _buildScoreCard(
           context,
           'الدرجة النهائية الحالية',
-          '${_formatNumber(_currentTotalScore)} / ${_formatNumber(_currentMaxScore)}',
+          '${_formatNumber(widget.result.totalScore)} / ${_formatNumber(widget.result.maxScore)}',
           Icons.score_outlined,
         ),
         _buildScoreCard(
@@ -1850,13 +2231,13 @@ class _TeacherStudentResultScreenState
         _buildScoreCard(
           context,
           'التصحيح التلقائي',
-          _formatNumber(_currentAutoScore),
+          _formatNumber(widget.result.autoScore),
           Icons.auto_fix_high_outlined,
         ),
         _buildScoreCard(
           context,
           'التصحيح اليدوي الحالي',
-          _formatNumber(_currentManualScore),
+          _formatNumber(widget.result.manualScore),
           Icons.edit_outlined,
         ),
         const SizedBox(height: 8),
@@ -1913,10 +2294,77 @@ class _TeacherStudentResultScreenState
             style: TextStyle(fontWeight: FontWeight.bold),
           ),
           centerTitle: true,
+          actions: [
+            IconButton(
+              tooltip: widget.result.status == 'published'
+                  ? 'تحديث وإعادة نشر'
+                  : 'نشر النتيجة',
+              onPressed: _loading || _saving ? null : _republishResult,
+              icon: const Icon(Icons.publish_outlined),
+            ),
+            IconButton(
+              tooltip: 'طباعة نتيجة الطالب',
+              onPressed: _loading || _saving ? null : _printStudentResult,
+              icon: const Icon(Icons.print_outlined),
+            ),
+          ],
         ),
         body: SafeArea(child: _buildBody(context)),
       ),
     );
+  }
+
+  static List<String> _readStringList(dynamic value) {
+    if (value is Iterable) return value.map((e) => e?.toString() ?? '').toList();
+    return [];
+  }
+
+  static bool _isTrueFalseType(String type) {
+    final value = type.trim().toLowerCase().replaceAll(' ', '');
+    return value == 'true_false' ||
+        value == 'true/false' ||
+        value == 'truefalse' ||
+        value == 'صح/خطأ' ||
+        value == 'صح/خطا' ||
+        value == 'صحخطأ' ||
+        value == 'صحخطا';
+  }
+
+  static int? _answerIndex(dynamic answer, List<String> options) {
+    if (answer is num) {
+      final index = answer.toInt();
+      if (index >= 0 && index < options.length) return index;
+    }
+    if (answer is String) {
+      final direct = int.tryParse(answer);
+      if (direct != null && direct >= 0 && direct < options.length) return direct;
+      final index = options.indexWhere((o) => o.trim() == answer.trim());
+      if (index >= 0) return index;
+    }
+    return null;
+  }
+
+  static int? _trueFalseAnswerIndex(dynamic answer) {
+    if (answer is bool) return answer ? 0 : 1;
+
+    if (answer is num) {
+      final index = answer.toInt();
+      if (index == 0 || index == 1) return index;
+    }
+
+    if (answer is String) {
+      final value = answer.trim().toLowerCase().replaceAll(' ', '');
+      if (value == '0' || value == 'true' || value == 'صح') return 0;
+      if (value == '1' || value == 'false' || value == 'خطأ' || value == 'خطا') return 1;
+    }
+
+    return null;
+  }
+
+  static List<int> _readIntList(dynamic value) {
+    if (value is Iterable) return value.map(_readInt).whereType<int>().toList();
+    final single = _readInt(value);
+    return single == null ? [] : [single];
   }
 
   static String _formatNumber(double value) {

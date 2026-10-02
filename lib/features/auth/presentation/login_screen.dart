@@ -4,6 +4,7 @@ import '../../../core/constants/app_strings.dart';
 import '../../../core/session/session_manager.dart';
 import '../../../core/session/user_session.dart';
 import '../services/auth_service.dart';
+import 'delete_account_screen.dart';
 
 class LoginScreen extends StatefulWidget {
   final SessionManager sessionManager;
@@ -105,6 +106,45 @@ class _LoginScreenState extends State<LoginScreen> {
       }
     }
   }
+  
+Future<void> _resetPassword() async {
+  final email = _emailController.text.trim();
+
+  if (email.isEmpty) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('يرجى إدخال البريد الإلكتروني أولاً'),
+      ),
+    );
+    return;
+  }
+
+  try {
+    await _authService.resetPassword(
+      email: email,
+    );
+
+    if (!mounted) return;
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text(
+          'تم إرسال رابط إعادة تعيين كلمة المرور إلى بريدك الإلكتروني',
+        ),
+      ),
+    );
+  } catch (e) {
+    if (!mounted) return;
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          e.toString().replaceFirst('Exception: ', ''),
+        ),
+      ),
+    );
+  }
+}
 
   @override
   Widget build(BuildContext context) {
@@ -219,6 +259,41 @@ class _LoginScreenState extends State<LoginScreen> {
                                 ),
                         ),
                       ),
+                      const SizedBox(height: 12),
+
+TextButton(
+  onPressed: _resetPassword,
+  child: const Text(
+    'نسيت كلمة المرور؟',
+    style: TextStyle(
+      fontSize: 15,
+      fontWeight: FontWeight.w600,
+    ),
+  ),
+),
+const SizedBox(height: 20),
+
+TextButton(
+  onPressed: _isLoading
+      ? null
+      : () {
+          Navigator.of(context).push(
+            MaterialPageRoute(
+              builder: (_) =>
+                  const DeleteAccountScreen(),
+            ),
+          );
+        },
+  child: const Text(
+    'لمسح الحساب نهائيًا اضغط هنا',
+    style: TextStyle(
+      color: Colors.red,
+      fontSize: 14,
+      fontWeight: FontWeight.w600,
+      decoration: TextDecoration.underline,
+    ),
+  ),
+),
                     ],
                   ),
                 ),

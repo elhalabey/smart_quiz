@@ -13,6 +13,7 @@ class _AddSubjectScreenState extends State<AddSubjectScreen> {
 
   final _nameArController = TextEditingController();
   final _nameEnController = TextEditingController();
+  final _unitsController = TextEditingController();
 
   bool _active = true;
   bool _isSaving = false;
@@ -21,8 +22,11 @@ class _AddSubjectScreenState extends State<AddSubjectScreen> {
   void dispose() {
     _nameArController.dispose();
     _nameEnController.dispose();
+    _unitsController.dispose();
     super.dispose();
   }
+
+  List<String> _parseUnits(String text) => text.split('\n').map((e) => e.trim()).where((e) => e.isNotEmpty).toSet().toList();
 
   Future<void> _saveSubject() async {
     if (!_formKey.currentState!.validate()) {
@@ -36,6 +40,7 @@ class _AddSubjectScreenState extends State<AddSubjectScreen> {
     try {
       final nameAr = _nameArController.text.trim();
       final nameEn = _nameEnController.text.trim();
+      final units = _parseUnits(_unitsController.text);
 
       final existingSubject = await FirebaseFirestore.instance
           .collection('subjects')
@@ -51,6 +56,7 @@ class _AddSubjectScreenState extends State<AddSubjectScreen> {
         'nameAr': nameAr,
         'nameEn': nameEn,
         'active': _active,
+        'units': units,
         'createdAt': FieldValue.serverTimestamp(),
       });
 
@@ -166,6 +172,20 @@ class _AddSubjectScreenState extends State<AddSubjectScreen> {
                         _saveSubject();
                       }
                     },
+                  ),
+
+                  const SizedBox(height: 16),
+
+                  TextFormField(
+                    controller: _unitsController,
+                    maxLines: 6,
+                    decoration: const InputDecoration(
+                      labelText: 'وحدات المادة',
+                      hintText: 'اكتب اسم كل وحدة في سطر مستقل',
+                      helperText: 'يمكن تركها فارغة وإضافتها لاحقًا',
+                      prefixIcon: Icon(Icons.view_list_outlined),
+                      border: OutlineInputBorder(),
+                    ),
                   ),
 
                   const SizedBox(height: 20),

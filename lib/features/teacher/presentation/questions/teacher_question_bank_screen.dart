@@ -2,6 +2,14 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 
+import '../../../../core/session/session_manager.dart';
+import '../quizzes/add_teacher_question_screen.dart';
+import '../quizzes/edit_teacher_question_screen.dart';
+import 'question_unit_file_transfer.dart';
+import 'services/question_unit_transfer.dart';
+import 'services/question_transfer.dart';
+import 'web/question_file_transfer.dart';
+
 /// بنك الأسئلة الخاص بالمعلم.
 ///
 /// الاستخدام:
@@ -13,12 +21,14 @@ import 'package:flutter/material.dart';
 /// - onAddQuestion و onEditQuestion اختياريان حتى يمكن ربط الشاشة
 ///   لاحقًا بشاشات الإضافة والتعديل الحالية بدون تعديل هذا الملف.
 class TeacherQuestionBankScreen extends StatefulWidget {
+  final SessionManager sessionManager;
   final VoidCallback? onAddQuestion;
   final void Function(String questionId, Map<String, dynamic> questionData)?
       onEditQuestion;
 
   const TeacherQuestionBankScreen({
     super.key,
+    required this.sessionManager,
     this.onAddQuestion,
     this.onEditQuestion,
   });
@@ -39,9 +49,10 @@ class _TeacherQuestionBankScreenState
   List<QueryDocumentSnapshot<Map<String, dynamic>>> _filteredQuestions = [];
 
   final Map<String, String> _subjectNames = {};
+  final Map<String, String> _questionUnits = {};
 
   String _selectedSubjectId = '';
-  String _selectedType = 'all';
+  String _selectedUnit = '';
   String _selectedSort = 'newest';
 
   bool _loading = true;
@@ -86,6 +97,21 @@ class _TeacherQuestionBankScreenState
           .collection('questions')
           .where('teacherId', isEqualTo: teacherId)
           .get();
+
+      // الوحدة بيانات مساعدة؛ فشل قراءتها لا يجب أن يمنع ظهور بنك الأسئلة.
+      try {
+        final unitsSnapshot = await _firestore
+            .collection('questionUnit')
+            .where('teacherId', isEqualTo: teacherId)
+            .get();
+        _questionUnits.clear();
+        for (final unitDoc in unitsSnapshot.docs) {
+          _questionUnits[unitDoc.id] =
+              unitDoc.data()['unitName']?.toString() ?? '';
+        }
+      } on FirebaseException {
+        _questionUnits.clear();
+      }
 
       await _loadSubjects(teacherId);
 
@@ -179,7 +205,7 @@ class _TeacherQuestionBankScreenState
 
       final text = data['text']?.toString().toLowerCase() ?? '';
       final subjectId = data['subjectId']?.toString() ?? '';
-      final type = data['type']?.toString() ?? '';
+      final unit = _questionUnits[doc.id] ?? '';
 
       final matchesSearch =
           search.isEmpty || text.contains(search);
@@ -188,11 +214,11 @@ class _TeacherQuestionBankScreenState
           _selectedSubjectId.isEmpty ||
           subjectId == _selectedSubjectId;
 
-      final matchesType =
-          _selectedType == 'all' ||
-          type == _selectedType;
+      final matchesUnit =
+          _selectedUnit.isEmpty ||
+          unit == _selectedUnit;
 
-      return matchesSearch && matchesSubject && matchesType;
+      return matchesSearch && matchesSubject && matchesUnit;
     }).toList();
 
     filtered.sort((a, b) {
@@ -371,7 +397,7 @@ class _TeacherQuestionBankScreenState
 
     setState(() {
       _selectedSubjectId = '';
-      _selectedType = 'all';
+      _selectedUnit = '';
       _selectedSort = 'newest';
     });
 
@@ -381,7 +407,176 @@ class _TeacherQuestionBankScreenState
   bool get _hasActiveFilters {
     return _searchController.text.trim().isNotEmpty ||
         _selectedSubjectId.isNotEmpty ||
-        _selectedType != 'all';
+        _selectedUnit.isNotEmpty;
+  }
+
+  Future<void> _exportQuestionUnits() async {
+    try {
+      final csv = await QuestionUnitTransfer.exportCsv();
+      await downloadQuestionUnitsCsv(csv);
+      if (mounted) {
+        _showMessage('تم تصدير وحدات الأسئلة إلى ملف question_units.csv');
+      }
+    } catch (e) {
+      if (mounted) {
+        _showMessage('تعذر تصدير وحدات الأسئلة:\n$e');
+      }
+    }
+  }
+
+  Future<void> _exportQuestions() async {
+    try {
+      final csv = await QuestionTransfer.exportCsv();
+      await downloadQuestionsCsv(csv);
+      if (mounted) _showMessage('تم تصدير بنك الأسئلة إلى ملف questions.csv');
+    } catch (e) {
+      if (mounted) _showMessage('تعذر تصدير بنك الأسئلة:\n$e');
+    }
+  }
+
+  Future<void> _importQuestions() async {
+    try {
+      final csv = await pickQuestionsCsv();
+      if (csv == null || csv.trim().isEmpty) return;
+      if (!mounted) return;
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: const Text('استيراد بنك الأسئلة'),
+          content: const Text(
+            'سيتم تحديث الأسئلة الموجودة بنفس questionId، وإنشاء سؤال جديد إذا كان questionId فارغًا.\n\n'
+            'يجب أن تكون المادة ضمن المواد المكلف بها المعلم.\n'
+            'لن يسمح النظام بتعديل سؤال يخص معلمًا آخر.\n\nهل تريد المتابعة؟',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext, false),
+              child: const Text('إلغاء'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(dialogContext, true),
+              child: const Text('استيراد'),
+            ),
+          ],
+        ),
+      );
+      if (confirmed != true) return;
+
+      if (!mounted) return;
+      showDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        builder: (_) => const AlertDialog(
+          content: Row(
+            children: [
+              CircularProgressIndicator(),
+              SizedBox(width: 16),
+              Expanded(child: Text('جاري استيراد الأسئلة...')),
+            ],
+          ),
+        ),
+      );
+
+      final result = await QuestionTransfer.importCsv(csv);
+      if (mounted) Navigator.of(context, rootNavigator: true).pop();
+      if (!mounted) return;
+
+      final errorText = result.errors.isEmpty
+          ? 'لا توجد أخطاء.'
+          : result.errors.take(12).join('\n');
+      await showDialog<void>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: const Text('نتيجة استيراد الأسئلة'),
+          content: SingleChildScrollView(
+            child: Text(
+              'تم إنشاء: ${result.created}\n'
+              'تم تحديث: ${result.updated}\n'
+              'عدد الأخطاء: ${result.errors.length}\n\n$errorText',
+            ),
+          ),
+          actions: [
+            FilledButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('موافق'),
+            ),
+          ],
+        ),
+      );
+      await _loadQuestionBank();
+    } catch (e) {
+      if (mounted) {
+        Navigator.of(context, rootNavigator: true).maybePop();
+        _showMessage('تعذر استيراد بنك الأسئلة:\n$e');
+      }
+    }
+  }
+
+  Future<void> _importQuestionUnits() async {
+    try {
+      final csv = await pickQuestionUnitsCsv();
+      if (csv == null || csv.trim().isEmpty) return;
+
+      if (!mounted) return;
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: const Text('استيراد وحدات الأسئلة'),
+          content: const Text(
+            'سيتم تحديث الوحدة فقط للأسئلة الموجودة التي تخص هذا المعلم.\n\n'
+            'إذا كان unitName فارغًا سيتم حذف وحدة السؤال.\n'
+            'لن يتم تعديل نص السؤال أو الإجابة أو الدرجة.\n\n'
+            'هل تريد المتابعة؟',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext, false),
+              child: const Text('إلغاء'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(dialogContext, true),
+              child: const Text('استيراد'),
+            ),
+          ],
+        ),
+      );
+
+      if (confirmed != true) return;
+
+      if (mounted) {
+        setState(() => _loading = true);
+      }
+
+      final result = await QuestionUnitTransfer.importCsv(csv);
+      await _loadQuestionBank();
+
+      if (!mounted) return;
+      await showDialog<void>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: const Text('نتيجة الاستيراد'),
+          content: SingleChildScrollView(
+            child: Text(
+              'تم تحديث: ${result.updated} سؤال\n'
+              'تم حذف الوحدة من: ${result.removed} سؤال\n'
+              'أخطاء: ${result.errors.length}'
+              '${result.errors.isEmpty ? '' : '\n\n${result.errors.take(20).join('\n')}'}',
+            ),
+          ),
+          actions: [
+            FilledButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('موافق'),
+            ),
+          ],
+        ),
+      );
+    } catch (e) {
+      if (mounted) {
+        setState(() => _loading = false);
+        _showMessage('تعذر استيراد وحدات الأسئلة:\n$e');
+      }
+    }
   }
 
   void _handleAddQuestion() {
@@ -390,15 +585,23 @@ class _TeacherQuestionBankScreenState
       return;
     }
 
-    _showMessage(
-      'اربط زر إضافة السؤال بشاشة إضافة السؤال الحالية.',
-    );
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => AddTeacherQuestionScreen(
+          sessionManager: widget.sessionManager,
+        ),
+      ),
+    ).then((_) {
+      if (mounted) {
+        _loadQuestionBank();
+      }
+    });
   }
 
-  void _handleEditQuestion(
+  Future<void> _handleEditQuestion(
     String questionId,
     Map<String, dynamic> questionData,
-  ) {
+  ) async {
     if (widget.onEditQuestion != null) {
       widget.onEditQuestion!(
         questionId,
@@ -407,9 +610,28 @@ class _TeacherQuestionBankScreenState
       return;
     }
 
-    _showMessage(
-      'اربط تعديل السؤال بشاشة التعديل الحالية.',
+    final subjectId = questionData['subjectId']?.toString() ?? '';
+
+    final updated = await Navigator.of(context).push<bool>(
+      MaterialPageRoute(
+        builder: (_) => EditTeacherQuestionScreen(
+          sessionManager: widget.sessionManager,
+          questionId: questionId,
+          quizId: '',
+          quizTitle: 'بنك الأسئلة',
+          subjectId: subjectId,
+          questionData: questionData,
+        ),
+      ),
     );
+
+    if (!mounted) {
+      return;
+    }
+
+    if (updated == true) {
+      await _loadQuestionBank();
+    }
   }
 
   Future<void> _confirmDeleteQuestion(
@@ -427,8 +649,8 @@ class _TeacherQuestionBankScreenState
             title: const Text('حذف السؤال'),
             content: Text(
               text.isEmpty
-                  ? 'هل تريد حذف هذا السؤال من بنك الأسئلة؟'
-                  : 'هل تريد حذف السؤال التالي من بنك الأسئلة؟\n\n$text',
+                  ? 'هل تريد حذف هذا السؤال من بنك الأسئلة؟\n\nID السؤال: ${doc.id}'
+                  : 'هل تريد حذف السؤال التالي من بنك الأسئلة؟\n\n$text\n\nID السؤال: ${doc.id}',
             ),
             actions: [
               TextButton(
@@ -480,11 +702,14 @@ class _TeacherQuestionBankScreenState
 
       final keyRef =
           _firestore.collection('questionKeys').doc(doc.id);
+      final unitRef =
+          _firestore.collection('questionUnit').doc(doc.id);
 
       final batch = _firestore.batch();
 
       batch.delete(questionRef);
       batch.delete(keyRef);
+      batch.delete(unitRef);
 
       await batch.commit();
 
@@ -525,6 +750,8 @@ class _TeacherQuestionBankScreenState
   }
 
   Widget _buildHeaderStats(BuildContext context) {
+    //final theme = Theme.of(context);
+
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(16),
@@ -682,42 +909,32 @@ class _TeacherQuestionBankScreenState
                   },
                 );
 
-                final typeDropdown =
+                final unitNames = _questionUnits.values
+                    .where((unit) => unit.trim().isNotEmpty)
+                    .toSet()
+                    .toList()
+                  ..sort();
+
+                final unitDropdown =
                     DropdownButtonFormField<String>(
-                  value: _selectedType,
+                  value: _selectedUnit,
                   decoration: const InputDecoration(
-                    labelText: 'نوع السؤال',
+                    labelText: 'الوحدة',
                     border: OutlineInputBorder(),
                   ),
-                  items: const [
-                    DropdownMenuItem<String>(
-                      value: 'all',
-                      child: Text('كل الأنواع'),
+                  items: [
+                    const DropdownMenuItem<String>(
+                      value: '',
+                      child: Text('كل الوحدات'),
                     ),
-                    DropdownMenuItem<String>(
-                      value: 'single_choice',
-                      child: Text('اختيار من متعدد'),
-                    ),
-                    DropdownMenuItem<String>(
-                      value: 'multiple_choice',
-                      child: Text('اختيار متعدد'),
-                    ),
-                    DropdownMenuItem<String>(
-                      value: 'true_false',
-                      child: Text('صح / خطأ'),
-                    ),
-                    DropdownMenuItem<String>(
-                      value: 'ordering',
-                      child: Text('ترتيب'),
-                    ),
-                    DropdownMenuItem<String>(
-                      value: 'essay',
-                      child: Text('مقالي'),
-                    ),
+                    ...unitNames.map((unit) => DropdownMenuItem<String>(
+                          value: unit,
+                          child: Text(unit, overflow: TextOverflow.ellipsis),
+                        )),
                   ],
                   onChanged: (value) {
                     setState(() {
-                      _selectedType = value ?? 'all';
+                      _selectedUnit = value ?? '';
                     });
                     _applyFilters();
                   },
@@ -757,7 +974,7 @@ class _TeacherQuestionBankScreenState
                     children: [
                       Expanded(child: subjectDropdown),
                       const SizedBox(width: 10),
-                      Expanded(child: typeDropdown),
+                      Expanded(child: unitDropdown),
                       const SizedBox(width: 10),
                       Expanded(child: sortDropdown),
                     ],
@@ -768,7 +985,7 @@ class _TeacherQuestionBankScreenState
                   children: [
                     subjectDropdown,
                     const SizedBox(height: 10),
-                    typeDropdown,
+                    unitDropdown,
                     const SizedBox(height: 10),
                     sortDropdown,
                   ],
@@ -876,7 +1093,19 @@ class _TeacherQuestionBankScreenState
                   ),
                 ],
               ),
-              const SizedBox(height: 12),
+              const SizedBox(height: 8),
+              Align(
+                alignment: AlignmentDirectional.centerStart,
+                child: SelectableText(
+                  'ID السؤال: ${doc.id}',
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    fontFamily: 'monospace',
+                  ),
+                ),
+              ),
+              const SizedBox(height: 10),
               Wrap(
                 spacing: 8,
                 runSpacing: 8,
@@ -1122,6 +1351,28 @@ class _TeacherQuestionBankScreenState
           ),
           centerTitle: true,
           actions: [
+            IconButton(
+              tooltip: 'تصدير الأسئلة',
+              onPressed: _loading ? null : _exportQuestions,
+              icon: const Icon(Icons.download_for_offline_outlined),
+            ),
+            IconButton(
+              tooltip: 'استيراد الأسئلة',
+              onPressed: _loading ? null : _importQuestions,
+              icon: const Icon(Icons.upload_file_outlined),
+            ),
+            PopupMenuButton<String>(
+              tooltip: 'استيراد وتصدير الوحدات',
+              onSelected: (value) {
+                if (value == 'export_units') _exportQuestionUnits();
+                if (value == 'import_units') _importQuestionUnits();
+              },
+              itemBuilder: (_) => const [
+                PopupMenuItem(value: 'export_units', child: Text('تصدير الوحدات')),
+                PopupMenuItem(value: 'import_units', child: Text('استيراد الوحدات')),
+              ],
+              icon: const Icon(Icons.category_outlined),
+            ),
             IconButton(
               tooltip: 'تحديث',
               onPressed: _loading ? null : _loadQuestionBank,

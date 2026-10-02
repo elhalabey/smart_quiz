@@ -20,6 +20,7 @@ class _EditSubjectScreenState extends State<EditSubjectScreen> {
 
   late final TextEditingController _nameArController;
   late final TextEditingController _nameEnController;
+  late final TextEditingController _unitsController;
 
   late bool _active;
 
@@ -37,6 +38,11 @@ class _EditSubjectScreenState extends State<EditSubjectScreen> {
       text: widget.subjectData['nameEn']?.toString() ?? '',
     );
 
+    final existingUnits = (widget.subjectData['units'] is List)
+        ? (widget.subjectData['units'] as List).map((e) => e.toString()).join('\n')
+        : '';
+    _unitsController = TextEditingController(text: existingUnits);
+
     _active = widget.subjectData['active'] == true;
   }
 
@@ -44,8 +50,11 @@ class _EditSubjectScreenState extends State<EditSubjectScreen> {
   void dispose() {
     _nameArController.dispose();
     _nameEnController.dispose();
+    _unitsController.dispose();
     super.dispose();
   }
+
+  List<String> _parseUnits(String text) => text.split('\n').map((e) => e.trim()).where((e) => e.isNotEmpty).toSet().toList();
 
   Future<void> _saveSubject() async {
     if (!_formKey.currentState!.validate()) {
@@ -59,6 +68,7 @@ class _EditSubjectScreenState extends State<EditSubjectScreen> {
     try {
       final nameAr = _nameArController.text.trim();
       final nameEn = _nameEnController.text.trim();
+      final units = _parseUnits(_unitsController.text);
 
       final existingSubject = await FirebaseFirestore.instance
           .collection('subjects')
@@ -81,6 +91,7 @@ class _EditSubjectScreenState extends State<EditSubjectScreen> {
         'nameAr': nameAr,
         'nameEn': nameEn,
         'active': _active,
+        'units': units,
         'updatedAt': FieldValue.serverTimestamp(),
       });
 
@@ -196,6 +207,20 @@ class _EditSubjectScreenState extends State<EditSubjectScreen> {
                         _saveSubject();
                       }
                     },
+                  ),
+
+                  const SizedBox(height: 16),
+
+                  TextFormField(
+                    controller: _unitsController,
+                    maxLines: 6,
+                    decoration: const InputDecoration(
+                      labelText: 'وحدات المادة',
+                      hintText: 'اكتب اسم كل وحدة في سطر مستقل',
+                      helperText: 'يمكن تركها فارغة وإضافتها لاحقًا',
+                      prefixIcon: Icon(Icons.view_list_outlined),
+                      border: OutlineInputBorder(),
+                    ),
                   ),
 
                   const SizedBox(height: 20),

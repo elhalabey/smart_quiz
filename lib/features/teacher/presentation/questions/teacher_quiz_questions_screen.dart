@@ -1,6 +1,7 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 
+import '../quizzes/exam_print_service.dart';
 import '../../../../core/session/session_manager.dart';
 
 class TeacherQuizQuestionsScreen extends StatefulWidget {
@@ -49,7 +50,50 @@ class _TeacherQuizQuestionsScreenState
     _searchController.dispose();
     super.dispose();
   }
+Future<void> _printExam() async {
+  if (_selectedQuestions.isEmpty) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('لا توجد أسئلة داخل الاختبار للطباعة.'),
+      ),
+    );
+    return;
+  }
 
+  try {
+    final questions = <PrintQuestion>[];
+
+    for (var i = 0; i < _selectedQuestions.length; i++) {
+      final question = _selectedQuestions[i];
+
+      questions.add(
+        PrintQuestion(
+          number: i + 1,
+          text: question.text,
+          type: question.type,
+          options: question.options,
+          score: question.score,
+        ),
+      );
+    }
+
+    await printExam(
+      title: widget.quizTitle,
+      subject: widget.subjectId,
+      questions: questions,
+    );
+  } catch (e) {
+    if (!mounted) return;
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          'تعذر طباعة الامتحان: ${e.toString().replaceFirst('Exception: ', '')}',
+        ),
+      ),
+    );
+  }
+}
   Future<void> _loadQuestions() async {
     if (mounted) {
       setState(() {
@@ -74,13 +118,14 @@ class _TeacherQuizQuestionsScreenState
           .map((doc) {
             final data = doc.data();
             return _BankQuestion(
-              id: doc.id,
-              text: data['text']?.toString() ?? '',
-              type: data['type']?.toString() ?? 'single_choice',
-              score: _readDouble(data['score']) ?? 0,
-              timeLimitSeconds: _readInt(data['timeLimitSeconds']) ?? 0,
-              createdAt: _readDateTime(data['createdAt']),
-            );
+  id: doc.id,
+  text: data['text']?.toString() ?? '',
+  type: data['type']?.toString() ?? 'single_choice',
+  options: _readStringList(data['options']),
+  score: _readDouble(data['score']) ?? 0,
+  timeLimitSeconds: _readInt(data['timeLimitSeconds']) ?? 0,
+  createdAt: _readDateTime(data['createdAt']),
+);
           })
           .where((question) => question.text.trim().isNotEmpty)
           .toList();
@@ -135,7 +180,13 @@ class _TeacherQuizQuestionsScreenState
       });
     }
   }
+List<String> _readStringList(dynamic value) {
+  if (value is Iterable) {
+    return value.map((item) => item.toString()).toList();
+  }
 
+  return [];
+}
   void _applyFilters() {
     final search = _searchText.trim().toLowerCase();
 
@@ -624,12 +675,19 @@ class _TeacherQuizQuestionsScreenState
           title: Text('أسئلة الاختبار: ${widget.quizTitle}', style: const TextStyle(fontWeight: FontWeight.bold)),
           centerTitle: true,
           actions: [
-            IconButton(
-              tooltip: 'إعادة تحميل',
-              onPressed: _loading || _saving ? null : _loadQuestions,
-              icon: const Icon(Icons.refresh),
-            ),
-          ],
+  IconButton(
+    tooltip: 'طباعة الامتحان',
+    onPressed: _loading || _saving || _selectedQuestions.isEmpty
+        ? null
+        : _printExam,
+    icon: const Icon(Icons.print_outlined),
+  ),
+  IconButton(
+    tooltip: 'إعادة تحميل',
+    onPressed: _loading || _saving ? null : _loadQuestions,
+    icon: const Icon(Icons.refresh),
+  ),
+],
         ),
         body: _loading
             ? const Center(child: CircularProgressIndicator())
@@ -690,6 +748,7 @@ class _BankQuestion {
   final String id;
   final String text;
   final String type;
+  final List<String> options;
   final double score;
   final int timeLimitSeconds;
   final DateTime? createdAt;
@@ -698,6 +757,7 @@ class _BankQuestion {
     required this.id,
     required this.text,
     required this.type,
+    required this.options,
     required this.score,
     required this.timeLimitSeconds,
     required this.createdAt,

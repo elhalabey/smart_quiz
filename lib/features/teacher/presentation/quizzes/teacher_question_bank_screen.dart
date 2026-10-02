@@ -480,11 +480,14 @@ class _TeacherQuestionBankScreenState
 
       final keyRef =
           _firestore.collection('questionKeys').doc(doc.id);
+      final unitRef =
+          _firestore.collection('questionUnit').doc(doc.id);
 
       final batch = _firestore.batch();
 
       batch.delete(questionRef);
       batch.delete(keyRef);
+      batch.delete(unitRef);
 
       await batch.commit();
 

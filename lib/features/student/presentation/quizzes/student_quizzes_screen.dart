@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
@@ -38,6 +39,7 @@ class _StudentQuizzesScreenState extends State<StudentQuizzesScreen> {
       });
     }
 
+    String loadStage = 'بدء تحميل الاختبارات';
     try {
       final studentId = widget.sessionManager.currentSession?.uid;
 
@@ -45,6 +47,7 @@ class _StudentQuizzesScreenState extends State<StudentQuizzesScreen> {
         throw Exception('لم يتم العثور على جلسة الطالب.');
       }
 
+      loadStage = 'قراءة بيانات الطالب';
       final studentDoc =
           await _firestore.collection('students').doc(studentId).get();
 
@@ -64,6 +67,7 @@ class _StudentQuizzesScreenState extends State<StudentQuizzesScreen> {
         throw Exception('لم يتم تحديد فصل الطالب.');
       }
 
+      loadStage = 'قراءة الاختبارات المرتبطة بالفصل';
       final quizClassesSnapshot = await _firestore
           .collection('quizClasses')
           .where('classId', isEqualTo: classId)
@@ -75,56 +79,40 @@ class _StudentQuizzesScreenState extends State<StudentQuizzesScreen> {
           .where((id) => id.isNotEmpty)
           .toSet();
 
-      // Load this student's attempts once so submitted quizzes are
-      // displayed as submitted instead of appearing available.
+      // Load this student's attempts once so submitted exams are shown
+      // as submitted and cannot be started again.
+      loadStage = 'قراءة محاولات الطالب';
       final attemptsSnapshot = await _firestore
           .collection('attempts')
           .where('studentId', isEqualTo: studentId)
           .get();
 
-      final attemptStatusByQuizId = <String, String>{};
-      for (final attemptDoc in attemptsSnapshot.docs) {
-        final attemptData = attemptDoc.data();
-        final attemptQuizId = attemptData['quizId']?.toString();
-        final attemptStatus = attemptData['status']?.toString();
-
-        if (attemptQuizId == null ||
-            attemptQuizId.isEmpty ||
-            attemptStatus == null ||
-            attemptStatus.isEmpty) {
-          continue;
-        }
-
-        // A submitted attempt takes priority over any older in-progress
-        // attempt for the same quiz.
-        if (attemptStatus == 'submitted' ||
-            !attemptStatusByQuizId.containsKey(attemptQuizId)) {
-          attemptStatusByQuizId[attemptQuizId] = attemptStatus;
+      final submittedQuizIds = <String>{};
+      for (final attempt in attemptsSnapshot.docs) {
+        final data = attempt.data();
+        if (data['status']?.toString() == 'submitted') {
+          final quizId = data['quizId']?.toString();
+          if (quizId != null && quizId.isNotEmpty) {
+            submittedQuizIds.add(quizId);
+          }
         }
       }
 
       final quizzes = <_StudentQuiz>[];
 
       for (final quizId in quizIds) {
+        loadStage = 'قراءة بيانات الاختبار';
         DocumentSnapshot<Map<String, dynamic>> quizDoc;
 
         try {
           quizDoc =
               await _firestore.collection('quizzes').doc(quizId).get();
         } on FirebaseException catch (e) {
-          // Students are only allowed to read published quizzes.
-          // A draft/closed/archived quiz may still have a quizClasses
-          // mapping, so permission-denied for that quiz must not prevent
-          // the rest of the student's published quizzes from loading.
-          if (e.code == 'permission-denied') {
-            continue;
-          }
+          if (e.code == 'permission-denied') continue;
           rethrow;
         }
 
-        if (!quizDoc.exists) {
-          continue;
-        }
+        if (!quizDoc.exists) continue;
 
         final data = quizDoc.data();
 
@@ -147,7 +135,7 @@ class _StudentQuizzesScreenState extends State<StudentQuizzesScreen> {
             startAt: startAt,
             endAt: endAt,
             createdAt: createdAt,
-            attemptStatus: attemptStatusByQuizId[quizId],
+            submitted: submittedQuizIds.contains(quizDoc.id),
           ),
         );
       }
@@ -174,7 +162,7 @@ class _StudentQuizzesScreenState extends State<StudentQuizzesScreen> {
       setState(() {
         _loading = false;
         _errorMessage =
-            'حدث خطأ أثناء تحميل الاختبارات: ${e.message ?? e.code}';
+            'حدث خطأ أثناء تحميل الاختبارات ($loadStage): ${e.message ?? e.code}';
       });
     } catch (e) {
       if (!mounted) {
@@ -212,7 +200,7 @@ class _StudentQuizzesScreenState extends State<StudentQuizzesScreen> {
   }
 
   String _getQuizState(_StudentQuiz quiz) {
-    if (quiz.attemptStatus == 'submitted') {
+    if (quiz.submitted) {
       return 'تم التسليم';
     }
 
@@ -334,20 +322,7 @@ class _StudentQuizzesScreenState extends State<StudentQuizzesScreen> {
       return;
     }
 
-    final quizState = _getQuizState(quiz);
-
-    if (quizState == 'تم التسليم') {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('تم تسليم هذا الاختبار بالفعل.'),
-          ),
-        );
-      }
-      return;
-    }
-
-    if (quizState != 'متاح') {
+    if (_getQuizState(quiz) != 'متاح') {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
@@ -369,18 +344,7 @@ class _StudentQuizzesScreenState extends State<StudentQuizzesScreen> {
         final data = doc.data();
         final status = data['status']?.toString() ?? '';
 
-        if (status == 'submitted') {
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(
-                content: Text('تم تسليم هذا الاختبار بالفعل.'),
-              ),
-            );
-          }
-          return;
-        }
-
-        if (status == 'in_progress') {
+        if (status == 'submitted' || status == 'in_progress') {
           if (!mounted) {
             return;
           }
@@ -498,9 +462,11 @@ class _StudentQuizzesScreenState extends State<StudentQuizzesScreen> {
               CircleAvatar(
                 radius: 25,
                 child: Icon(
-                  state == 'متاح'
-                      ? Icons.assignment_outlined
-                      : Icons.assignment_late_outlined,
+                  state == 'تم التسليم'
+                      ? Icons.assignment_turned_in_outlined
+                      : state == 'متاح'
+                          ? Icons.assignment_outlined
+                          : Icons.assignment_late_outlined,
                 ),
               ),
               const SizedBox(width: 14),
@@ -678,6 +644,7 @@ class _StudentQuizScreenState extends State<StudentQuizScreen> {
   int _currentIndex = 0;
 
   final Map<String, dynamic> _answers = {};
+  final Map<String, List<String>> _orderingOptions = {};
   final Map<String, DateTime> _questionStartedAt = {};
 
   Timer? _timer;
@@ -705,6 +672,7 @@ class _StudentQuizScreenState extends State<StudentQuizScreen> {
   }
 
   Future<void> _loadQuestions() async {
+    String loadStage = 'بدء تحميل الأسئلة';
     try {
       final attemptDoc = await _firestore
           .collection('attempts')
@@ -747,78 +715,98 @@ class _StudentQuizScreenState extends State<StudentQuizScreen> {
         }
       }
 
-      final quizQuestionsSnapshot = await _firestore
-          .collection('quizQuestions')
-          .where('quizId', isEqualTo: widget.quizId)
-          .where('status', isEqualTo: 'published')
-          .get();
-
-      final links = quizQuestionsSnapshot.docs.map((doc) {
-        final data = doc.data();
-
-        return _QuestionLink(
-          questionId: data['questionId']?.toString() ?? '',
-          order: _readInt(data['order']) ?? 0,
-        );
-      }).where((link) => link.questionId.isNotEmpty).toList();
-
-      links.sort((a, b) => a.order.compareTo(b.order));
-
-      final questions = <_StudentQuestion>[];
-
-      for (final link in links) {
-        final questionDoc = await _firestore
-            .collection('questions')
-            .doc(link.questionId)
+      // IMPORTANT:
+      // Do not filter quizQuestions by their own status field.
+      // Quiz publication is controlled by quizzes/{quizId}.status in Firestore Rules.
+      // This keeps old quizQuestions links valid when a teacher changes
+      // draft <-> published or edits the quiz later.
+      try {
+        loadStage = 'قراءة ربط أسئلة الاختبار';
+        final quizQuestionsSnapshot = await _firestore
+            .collection('quizQuestions')
+            .where('quizId', isEqualTo: widget.quizId)
             .get();
 
-        if (!questionDoc.exists) {
-          continue;
+        final links = quizQuestionsSnapshot.docs.map((doc) {
+          final data = doc.data();
+
+          return _QuestionLink(
+            questionId: data['questionId']?.toString() ?? '',
+            order: _readInt(data['order']) ?? 0,
+          );
+        }).where((link) => link.questionId.isNotEmpty).toList();
+
+        links.sort((a, b) => a.order.compareTo(b.order));
+
+        final questions = <_StudentQuestion>[];
+
+        for (final link in links) {
+          loadStage = 'قراءة السؤال';
+          final questionDoc = await _firestore
+              .collection('questions')
+              .doc(link.questionId)
+              .get();
+
+          if (!questionDoc.exists) {
+            continue;
+          }
+
+          final data = questionDoc.data();
+
+          if (data == null) {
+            continue;
+          }
+
+          final type = data['type']?.toString() ?? 'single_choice';
+
+          final question = _StudentQuestion(
+            id: questionDoc.id,
+            text: data['text']?.toString() ?? '',
+            type: type,
+            options: _readStringList(data['options']),
+            score: _readDouble(data['score']) ?? 0,
+            timeLimitSeconds: _readInt(data['timeLimitSeconds']) ?? 0,
+            maxCharacters: _readInt(data['maxCharacters']) ?? 0,
+          );
+
+          questions.add(question);
+
+          if (type == 'ordering') {
+            final orderingOptions = List<String>.from(question.options)
+              ..shuffle(math.Random());
+
+            _orderingOptions[question.id] = orderingOptions;
+            _answers[question.id] = List<String>.from(orderingOptions);
+          }
+
+          if (type == 'essay') {
+            _essayControllers[question.id] = TextEditingController();
+          }
         }
 
-        final data = questionDoc.data();
-
-        if (data == null) {
-          continue;
+        if (questions.isEmpty) {
+          throw Exception('لا توجد أسئلة داخل هذا الاختبار.');
         }
 
-        final type = data['type']?.toString() ?? 'single_choice';
+        if (!mounted) {
+          return;
+        }
 
-        final question = _StudentQuestion(
-          id: questionDoc.id,
-          text: data['text']?.toString() ?? '',
-          type: type,
-          options: _readStringList(data['options']),
-          score: _readDouble(data['score']) ?? 0,
-          timeLimitSeconds:
-              _readInt(data['timeLimitSeconds']) ?? 0,
-          maxCharacters:
-              _readInt(data['maxCharacters']) ?? 0,
+        setState(() {
+          _questions = questions;
+          _loading = false;
+        });
+
+        await _loadExistingAnswers();
+        _startCurrentQuestionTimer();
+      } on FirebaseException catch (e) {
+        throw FirebaseException(
+          plugin: e.plugin,
+          code: e.code,
+          message: '$loadStage: ${e.message ?? e.code}',
         );
-
-        questions.add(question);
-
-        if (type == 'essay') {
-          _essayControllers[question.id] =
-              TextEditingController();
-        }
       }
 
-      if (questions.isEmpty) {
-        throw Exception('لا توجد أسئلة داخل هذا الاختبار.');
-      }
-
-      if (!mounted) {
-        return;
-      }
-
-      setState(() {
-        _questions = questions;
-        _loading = false;
-      });
-
-      await _loadExistingAnswers();
-      _startCurrentQuestionTimer();
     } on FirebaseException catch (e) {
       if (!mounted) {
         return;
@@ -843,10 +831,17 @@ class _StudentQuizScreenState extends State<StudentQuizScreen> {
   }
 
   Future<void> _loadExistingAnswers() async {
-    final snapshot = await _firestore
-        .collection('answers')
-        .where('attemptId', isEqualTo: widget.attemptId)
-        .get();
+    final studentId = widget.sessionManager.currentSession?.uid;
+
+if (studentId == null) {
+  return;
+}
+
+final snapshot = await _firestore
+    .collection('answers')
+    .where('attemptId', isEqualTo: widget.attemptId)
+    .where('studentId', isEqualTo: studentId)
+    .get();
 
     for (final doc in snapshot.docs) {
       final data = doc.data();
@@ -1495,57 +1490,57 @@ class _StudentQuizScreenState extends State<StudentQuizScreen> {
   }
 
   Widget _buildOrdering(_StudentQuestion question) {
-    final selected =
-        List<String>.from(_answers[question.id] ?? const []);
-
-    final remaining = question.options
-        .where((option) => !selected.contains(option))
-        .toList();
+    final ordering = List<String>.from(
+      _answers[question.id] ??
+          _orderingOptions[question.id] ??
+          question.options,
+    );
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         const Text(
-          'اضغط على الاختيارات بالترتيب المطلوب:',
+          'اسحب العناصر وأفلتها لترتيبها:',
           style: TextStyle(fontWeight: FontWeight.w600),
         ),
         const SizedBox(height: 12),
-        if (selected.isNotEmpty) ...[
-          const Text(
-            'الترتيب الحالي:',
-            style: TextStyle(fontWeight: FontWeight.w600),
-          ),
-          const SizedBox(height: 8),
-          ...selected.asMap().entries.map((entry) {
+        ReorderableListView.builder(
+          shrinkWrap: true,
+          physics: const NeverScrollableScrollPhysics(),
+          buildDefaultDragHandles: false,
+          itemCount: ordering.length,
+          onReorder: (oldIndex, newIndex) async {
+            if (newIndex > oldIndex) {
+              newIndex -= 1;
+            }
+
+            final newList = List<String>.from(ordering);
+            final item = newList.removeAt(oldIndex);
+            newList.insert(newIndex, item);
+
+            _setOrdering(newList);
+            await _saveCurrentAnswer(showMessage: false);
+          },
+          itemBuilder: (context, index) {
+            final option = ordering[index];
+
             return Card(
+              key: ValueKey('${question.id}_$option'),
+              margin: const EdgeInsets.only(bottom: 8),
               child: ListTile(
-                leading: CircleAvatar(
-                  child: Text('${entry.key + 1}'),
+                leading: ReorderableDragStartListener(
+                  index: index,
+                  child: const Icon(Icons.drag_handle),
                 ),
-                title: Text(entry.value),
-                trailing: IconButton(
-                  icon: const Icon(Icons.close),
-                  onPressed: () {
-                    final newList = List<String>.from(selected)
-                      ..removeAt(entry.key);
-                    _setOrdering(newList);
-                  },
+                title: Text(option),
+                trailing: CircleAvatar(
+                  radius: 14,
+                  child: Text('${index + 1}'),
                 ),
               ),
             );
-          }),
-          const SizedBox(height: 12),
-        ],
-        ...remaining.map((option) {
-          return OutlinedButton(
-            onPressed: () {
-              final newList = List<String>.from(selected)
-                ..add(option);
-              _setOrdering(newList);
-            },
-            child: Text(option),
-          );
-        }),
+          },
+        ),
       ],
     );
   }
@@ -1722,7 +1717,7 @@ class _StudentQuiz {
   final DateTime? startAt;
   final DateTime? endAt;
   final DateTime createdAt;
-  final String? attemptStatus;
+  final bool submitted;
 
   const _StudentQuiz({
     required this.id,
@@ -1732,6 +1727,6 @@ class _StudentQuiz {
     required this.startAt,
     required this.endAt,
     required this.createdAt,
-    required this.attemptStatus,
+    required this.submitted,
   });
 }

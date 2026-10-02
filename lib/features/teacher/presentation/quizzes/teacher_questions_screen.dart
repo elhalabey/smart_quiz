@@ -1,9 +1,11 @@
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 
 import '../../../../core/session/session_manager.dart';
 import 'add_teacher_question_screen.dart';
 import 'edit_teacher_question_screen.dart';
+import 'exam_print_service.dart';
 
 class TeacherQuestionsScreen extends StatefulWidget {
   final SessionManager sessionManager;
@@ -31,6 +33,48 @@ class _TeacherQuestionsScreenState
 
   bool _loading = false;
   bool _reordering = false;
+
+  /// جلب اسم المادة العربي من:
+  /// subjects/{subjectId}
+  ///
+  /// والاعتماد على field:
+  /// nameAr
+  Future<String> _loadSubjectName() async {
+    final subjectId = widget.subjectId.trim();
+
+    if (subjectId.isEmpty) {
+      return 'غير محددة';
+    }
+
+    try {
+      final subjectDoc = await _firestore
+          .collection('subjects')
+          .doc(subjectId)
+          .get();
+
+      if (!subjectDoc.exists) {
+        return subjectId;
+      }
+
+      final data = subjectDoc.data();
+
+      if (data == null) {
+        return subjectId;
+      }
+
+      final nameAr = data['nameAr']?.toString().trim();
+
+      if (nameAr != null && nameAr.isNotEmpty) {
+        return nameAr;
+      }
+
+      return subjectId;
+    } catch (_) {
+      // في حالة حدوث مشكلة في جلب المادة،
+      // نرجع الـ ID بدل توقف عملية الطباعة بالكامل.
+      return subjectId;
+    }
+  }
 
   Future<List<_TeacherQuestionItem>> _loadQuestions() async {
     final quizQuestionsSnapshot = await _firestore
@@ -118,6 +162,80 @@ class _TeacherQuestionsScreenState
 
       default:
         return 'غير محدد';
+    }
+  }
+
+  Future<void> _printExam() async {
+    if (_loading || _reordering) {
+      return;
+    }
+
+    try {
+      final items = await _loadQuestions();
+
+      if (items.isEmpty) {
+        if (!mounted) return;
+
+        _showMessage(
+          'لا توجد أسئلة داخل الاختبار للطباعة.',
+        );
+
+        return;
+      }
+
+      // جلب اسم المادة من subjects باستخدام subjectId
+      final subjectName = await _loadSubjectName();
+
+      final questions = <PrintQuestion>[];
+
+      for (var i = 0; i < items.length; i++) {
+        final item = items[i];
+        final data = item.data;
+
+        final rawOptions = data['options'];
+
+        final options = rawOptions is Iterable
+            ? rawOptions
+                .map(
+                  (option) => option.toString(),
+                )
+                .toList()
+            : <String>[];
+
+        final scoreValue = data['score'];
+
+        final score = scoreValue is num
+            ? scoreValue.toDouble()
+            : double.tryParse(
+                  scoreValue?.toString() ?? '',
+                ) ??
+                1.0;
+
+        questions.add(
+          PrintQuestion(
+            number: i + 1,
+            text: data['text']?.toString() ?? '',
+            type: data['type']?.toString() ?? '',
+            options: options,
+            score: score,
+          ),
+        );
+      }
+
+      await printExam(
+        title: widget.quizTitle,
+
+        // اسم المادة العربي بدل الـ subjectId
+        subject: subjectName,
+
+        questions: questions,
+      );
+    } catch (error) {
+      if (!mounted) return;
+
+      _showMessage(
+        'تعذر طباعة الامتحان:\n$error',
+      );
     }
   }
 
@@ -445,6 +563,18 @@ class _TeacherQuestionsScreenState
             ),
           ),
           centerTitle: true,
+          actions: [
+            IconButton(
+              tooltip: 'طباعة الامتحان',
+              onPressed:
+                  _loading || _reordering
+                      ? null
+                      : _printExam,
+              icon: const Icon(
+                Icons.print_outlined,
+              ),
+            ),
+          ],
         ),
         body: FutureBuilder<List<_TeacherQuestionItem>>(
           future: _loadQuestions(),
@@ -465,7 +595,8 @@ class _TeacherQuestionsScreenState
                   padding: const EdgeInsets.all(24),
                   child: Text(
                     'حدث خطأ أثناء تحميل الأسئلة:\n${snapshot.error}',
-                    textAlign: TextAlign.center,
+                    textAlign:
+                        TextAlign.center,
                   ),
                 ),
               );
@@ -591,7 +722,8 @@ class _TeacherQuestionsScreenState
             );
           },
         ),
-        floatingActionButton: FloatingActionButton.extended(
+        floatingActionButton:
+            FloatingActionButton.extended(
           onPressed:
               _loading ? null : _addQuestion,
           icon: _loading
@@ -628,3 +760,5 @@ class _TeacherQuestionItem {
     required this.data,
   });
 }
+
+

@@ -32,6 +32,7 @@ class _StudentResultDetailsScreenState
   double _manualScore = 0;
 
   final List<_StudentQuestionResult> _questions = [];
+  final Map<String, String> _correctAnswers = {};
 
   @override
   void initState() {
@@ -43,10 +44,13 @@ class _StudentResultDetailsScreenState
     final studentId = widget.sessionManager.currentSession?.uid;
 
     if (studentId == null || studentId.isEmpty) {
+      if (!mounted) return;
+
       setState(() {
         _loading = false;
         _error = 'لم يتم العثور على حساب الطالب.';
       });
+
       return;
     }
 
@@ -61,6 +65,7 @@ class _StudentResultDetailsScreenState
       }
 
       final resultData = resultDoc.data();
+
       if (resultData == null) {
         throw Exception('تعذر قراءة بيانات النتيجة.');
       }
@@ -84,57 +89,62 @@ class _StudentResultDetailsScreenState
         throw Exception('بيانات المحاولة غير مكتملة.');
       }
 
-      _totalScore = _toDouble(resultData['totalScore']);
-      _maxScore = _toDouble(resultData['maxScore']);
-      _autoScore = _toDouble(resultData['autoScore']);
-      _manualScore = _toDouble(resultData['manualScore']);
+      final totalScore = _toDouble(resultData['totalScore']);
+      final maxScore = _toDouble(resultData['maxScore']);
+      final autoScore = _toDouble(resultData['autoScore']);
+      final manualScore = _toDouble(resultData['manualScore']);
 
-      final questionScores = _readQuestionScores(resultData['questionScores']);
+      final questionScores =
+          _readQuestionScores(resultData['questionScores']);
 
-      final quizDoc = await _firestore.collection('quizzes').doc(quizId).get();
+      final correctAnswers = _readCorrectAnswers(
+        resultData['correctAnswers'],
+      );
+
+      // نقرأ عنوان الاختبار، لكن تفاصيل النتيجة لا تعتمد على حالة نشر
+      // الاختبار الحالي.
+      String quizTitle = 'الاختبار';
+
+      final quizDoc =
+          await _firestore.collection('quizzes').doc(quizId).get();
+
       if (quizDoc.exists) {
         final quizData = quizDoc.data();
-        if (quizData != null && quizData['title'] != null) {
-          _quizTitle = quizData['title'].toString();
+
+        if (quizData != null) {
+          quizTitle = quizData['title']?.toString() ??
+              quizData['name']?.toString() ??
+              'الاختبار';
         }
       }
 
-      final linksSnapshot = await _firestore
-          .collection('quizQuestions')
-          .where('quizId', isEqualTo: quizId)
-          .get();
-
-      final links = linksSnapshot.docs.toList()
-        ..sort((a, b) {
-          final aOrder = _toInt(a.data()['order']);
-          final bOrder = _toInt(b.data()['order']);
-          return aOrder.compareTo(bOrder);
-        });
-
+      // The quiz may be closed/archived after completion.
+      // Result details must not depend on the current quiz publication status.
       final answersSnapshot = await _firestore
           .collection('answers')
           .where('attemptId', isEqualTo: attemptId)
           .where('studentId', isEqualTo: studentId)
           .get();
 
-      final answersByQuestionId = <String, dynamic>{};
+      final answersByQuestion = <String, dynamic>{};
+
       for (final answerDoc in answersSnapshot.docs) {
         final data = answerDoc.data();
         final questionId = data['questionId']?.toString();
-        if (questionId != null && questionId.isNotEmpty) {
-          answersByQuestionId[questionId] = data['answer'];
-        }
-      }
-
-      final loadedQuestions = <_StudentQuestionResult>[];
-
-      for (final linkDoc in links) {
-        final linkData = linkDoc.data();
-        final questionId = linkData['questionId']?.toString();
 
         if (questionId == null || questionId.isEmpty) {
           continue;
         }
+
+        answersByQuestion[questionId] = data['answer'];
+      }
+
+      final loadedQuestions = <_StudentQuestionResult>[];
+
+      final questionIds = questionScores.keys.toList();
+
+      for (var index = 0; index < questionIds.length; index++) {
+        final questionId = questionIds[index];
 
         final questionDoc = await _firestore
             .collection('questions')
@@ -146,33 +156,61 @@ class _StudentResultDetailsScreenState
         }
 
         final questionData = questionDoc.data();
+
         if (questionData == null) {
           continue;
         }
 
-        final type = questionData['type']?.toString() ?? '';
-        final text = questionData['text']?.toString() ?? '';
-        final maxScore = _toDouble(questionData['score']);
+        final order = _toInt(questionData['order']) > 0
+            ? _toInt(questionData['order'])
+            : index + 1;
+
+        final earnedScore = _toDouble(
+          questionScores[questionId],
+        );
+
+        final maxQuestionScore = _toDouble(
+          questionData['maxScore'] ??
+              questionData['score'] ??
+              questionData['points'] ??
+              1,
+        );
 
         loadedQuestions.add(
           _StudentQuestionResult(
-            order: _toInt(linkData['order']),
+            order: order,
             questionId: questionId,
-            type: type,
-            text: text,
-            studentAnswer: answersByQuestionId[questionId],
-            earnedScore: questionScores[questionId],
-            maxScore: maxScore,
+            text: questionData['text']?.toString() ?? '',
+            type: questionData['type']?.toString() ?? '',
+            options: _readStringList(questionData['options']),
+            studentAnswer: answersByQuestion[questionId],
+            correctAnswer: correctAnswers[questionId],
+            earnedScore: earnedScore,
+            maxScore: maxQuestionScore,
           ),
         );
       }
 
+      loadedQuestions.sort(
+        (a, b) => a.order.compareTo(b.order),
+      );
+
       if (!mounted) return;
 
       setState(() {
+        _quizTitle = quizTitle;
+        _totalScore = totalScore;
+        _maxScore = maxScore;
+        _autoScore = autoScore;
+        _manualScore = manualScore;
+
         _questions
           ..clear()
           ..addAll(loadedQuestions);
+        _correctAnswers
+          ..clear()
+          ..addAll(correctAnswers);
+
         _loading = false;
         _error = null;
       });
@@ -192,8 +230,25 @@ class _StudentResultDetailsScreenState
     }
 
     final result = <String, double>{};
+
     for (final entry in value.entries) {
       result[entry.key.toString()] = _toDouble(entry.value);
+    }
+
+    return result;
+  }
+
+  Map<String, String> _readCorrectAnswers(dynamic value) {
+    if (value is! Map) {
+      return {};
+    }
+
+    final result = <String, String>{};
+    for (final entry in value.entries) {
+      final answer = entry.value?.toString() ?? '';
+      if (answer.trim().isNotEmpty) {
+        result[entry.key.toString()] = answer;
+      }
     }
     return result;
   }
@@ -202,6 +257,7 @@ class _StudentResultDetailsScreenState
     if (value is num) {
       return value.toDouble();
     }
+
     return double.tryParse(value?.toString() ?? '') ?? 0;
   }
 
@@ -209,17 +265,21 @@ class _StudentResultDetailsScreenState
     if (value is int) {
       return value;
     }
+
     if (value is num) {
       return value.toInt();
     }
+
     return int.tryParse(value?.toString() ?? '') ?? 0;
   }
 
   String _friendlyError(Object error) {
     final message = error.toString();
+
     if (message.startsWith('Exception: ')) {
       return message.substring('Exception: '.length);
     }
+
     return 'حدث خطأ أثناء تحميل تفاصيل النتيجة.';
   }
 
@@ -235,7 +295,9 @@ class _StudentResultDetailsScreenState
 
   Widget _buildBody() {
     if (_loading) {
-      return const Center(child: CircularProgressIndicator());
+      return const Center(
+        child: CircularProgressIndicator(),
+      );
     }
 
     if (_error != null) {
@@ -245,7 +307,10 @@ class _StudentResultDetailsScreenState
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const Icon(Icons.error_outline, size: 48),
+              const Icon(
+                Icons.error_outline,
+                size: 48,
+              ),
               const SizedBox(height: 12),
               Text(
                 _error!,
@@ -258,6 +323,7 @@ class _StudentResultDetailsScreenState
                     _loading = true;
                     _error = null;
                   });
+
                   _loadDetails();
                 },
                 child: const Text('إعادة المحاولة'),
@@ -316,7 +382,8 @@ class _StudentResultDetailsScreenState
                 Expanded(
                   child: _summaryItem(
                     'الدرجة النهائية',
-                    '${_formatScore(_totalScore)} / ${_formatScore(_maxScore)}',
+                    '${_formatScore(_totalScore)} / '
+                        '${_formatScore(_maxScore)}',
                   ),
                 ),
                 Expanded(
@@ -418,24 +485,57 @@ class _StudentResultDetailsScreenState
               width: double.infinity,
               padding: const EdgeInsets.all(12),
               decoration: BoxDecoration(
-                border: Border.all(color: Colors.grey.shade300),
+                border: Border.all(
+                  color: Colors.grey.shade300,
+                ),
                 borderRadius: BorderRadius.circular(8),
               ),
               child: Text(
-                _formatStudentAnswer(question.studentAnswer),
+                _formatStudentAnswer(question.type, question.studentAnswer, question.options),
                 style: const TextStyle(fontSize: 15),
               ),
             ),
+            if (question.correctAnswer != null &&
+                question.correctAnswer!.trim().isNotEmpty) ...[
+              const SizedBox(height: 14),
+              const Text(
+                'الإجابة الصحيحة',
+                style: TextStyle(
+                  fontWeight: FontWeight.bold,
+                  fontSize: 15,
+                ),
+              ),
+              const SizedBox(height: 7),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  border: Border.all(
+                    color: Theme.of(context).colorScheme.primary,
+                  ),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Text(
+                  question.correctAnswer!,
+                  style: const TextStyle(fontSize: 15),
+                ),
+              ),
+            ],
+            const SizedBox(height: 12),
+            _buildAnswerStatus(question),
             const SizedBox(height: 14),
             Row(
               children: [
                 const Text(
                   'الدرجة: ',
-                  style: TextStyle(fontWeight: FontWeight.bold),
+                  style: TextStyle(
+                    fontWeight: FontWeight.bold,
+                  ),
                 ),
                 Text(
                   hasScore
-                      ? '${_formatScore(earnedScore)} / ${_formatScore(question.maxScore)}'
+                      ? '${_formatScore(earnedScore)} / '
+                          '${_formatScore(question.maxScore)}'
                       : 'غير متاحة',
                 ),
               ],
@@ -446,33 +546,104 @@ class _StudentResultDetailsScreenState
     );
   }
 
-  String _formatStudentAnswer(dynamic answer) {
-    if (answer == null) {
-      return 'لم تتم الإجابة';
+  Widget _buildAnswerStatus(_StudentQuestionResult question) {
+    final earned = question.earnedScore;
+    if (earned == null) return const SizedBox.shrink();
+
+    final max = question.maxScore;
+    final isFull = max > 0 && earned >= max;
+    final isZero = earned <= 0;
+
+    final label = isFull
+        ? 'إجابة صحيحة'
+        : isZero
+            ? 'إجابة غير صحيحة'
+            : 'إجابة صحيحة جزئيًا';
+
+    final icon = isFull
+        ? Icons.check_circle_outline
+        : isZero
+            ? Icons.cancel_outlined
+            : Icons.adjust_outlined;
+
+    final color = isFull
+        ? Theme.of(context).colorScheme.primary
+        : isZero
+            ? Theme.of(context).colorScheme.error
+            : Theme.of(context).colorScheme.tertiary;
+
+    return Row(
+      children: [
+        Icon(icon, size: 20, color: color),
+        const SizedBox(width: 7),
+        Text(
+          label,
+          style: TextStyle(
+            fontWeight: FontWeight.w700,
+            color: color,
+          ),
+        ),
+      ],
+    );
+  }
+
+  String _formatStudentAnswer(
+    String type,
+    dynamic answer,
+    List<String> options,
+  ) {
+    if (answer == null) return 'لم تتم الإجابة';
+
+    if (type == 'true_false') {
+      if (answer is bool) return answer ? 'صح' : 'خطأ';
+      final index = _readInt(answer);
+      if (index == 0) return 'صح';
+      if (index == 1) return 'خطأ';
     }
 
-    if (answer is bool) {
-      return answer ? 'صح' : 'خطأ';
+    String formatOne(dynamic value) {
+      final index = _readInt(value);
+      if (index != null && index >= 0 && index < options.length) {
+        return options[index];
+      }
+      return value?.toString() ?? '';
     }
 
     if (answer is Iterable) {
-      final values = answer.map((item) => item.toString()).toList();
-      if (values.isEmpty) {
-        return 'لم تتم الإجابة';
-      }
+      final values = answer
+          .map(formatOne)
+          .where((value) => value.trim().isNotEmpty)
+          .toList();
+
+      if (values.isEmpty) return 'لم تتم الإجابة';
+
       return values.asMap().entries.map((entry) {
         return '${entry.key + 1}. ${entry.value}';
       }).join('\n');
     }
 
-    final text = answer.toString().trim();
+    final text = formatOne(answer).trim();
     return text.isEmpty ? 'لم تتم الإجابة' : text;
+  }
+
+  List<String> _readStringList(dynamic value) {
+    if (value is Iterable) {
+      return value.map((item) => item?.toString() ?? '').toList();
+    }
+    return [];
+  }
+
+  int? _readInt(dynamic value) {
+    if (value is int) return value;
+    if (value is num) return value.toInt();
+    return int.tryParse(value?.toString() ?? '');
   }
 
   String _formatScore(double value) {
     if (value == value.roundToDouble()) {
       return value.toInt().toString();
     }
+
     return value.toStringAsFixed(2);
   }
 }
@@ -483,7 +654,9 @@ class _StudentQuestionResult {
     required this.questionId,
     required this.type,
     required this.text,
+    required this.options,
     required this.studentAnswer,
+    required this.correctAnswer,
     required this.earnedScore,
     required this.maxScore,
   });
@@ -492,7 +665,10 @@ class _StudentQuestionResult {
   final String questionId;
   final String type;
   final String text;
+  final List<String> options;
   final dynamic studentAnswer;
+  final String? correctAnswer;
   final double? earnedScore;
   final double maxScore;
 }
+

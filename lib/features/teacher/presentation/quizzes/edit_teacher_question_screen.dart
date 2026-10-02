@@ -57,6 +57,8 @@ class _EditTeacherQuestionScreenState
   List<int> _correctOrder = <int>[];
 
   bool _loading = true;
+  List<String> _units = [];
+  String _selectedUnit = '';
   bool _saving = false;
 
   @override
@@ -102,14 +104,56 @@ class _EditTeacherQuestionScreenState
         );
       }
 
-      final keySnapshot = await _firestore
-          .collection('questionKeys')
-          .doc(widget.questionId)
-          .get();
+      // المفاتيح والوحدة بيانات مساعدة؛ لا نسمح بفشل تحميل السؤال
+      // بالكامل إذا كانت إحدى الوثيقتين قديمة أو غير موجودة.
+      Map<String, dynamic> keyData = <String, dynamic>{};
+      String savedUnit = '';
 
-      final keyData =
-          keySnapshot.data() ??
-              <String, dynamic>{};
+      try {
+        final keySnapshot = await _firestore
+            .collection('questionKeys')
+            .doc(widget.questionId)
+            .get();
+        if (keySnapshot.exists && keySnapshot.data() != null) {
+          keyData = keySnapshot.data()!;
+        }
+      } on FirebaseException {
+        // السؤال نفسه ما زال قابلًا للتعديل؛ نكمل بدون المفتاح.
+      }
+
+      try {
+        final unitSnapshot = await _firestore
+            .collection('questionUnit')
+            .doc(widget.questionId)
+            .get();
+        if (unitSnapshot.exists) {
+          savedUnit = unitSnapshot.data()?['unitName']?.toString() ?? '';
+        }
+      } on FirebaseException {
+        // الوحدة اختيارية للأسئلة القديمة.
+      }
+
+      final effectiveSubjectId =
+          questionData['subjectId']?.toString().trim().isNotEmpty == true
+              ? questionData['subjectId'].toString()
+              : widget.subjectId;
+
+      try {
+        final subjectSnapshot = await _firestore
+            .collection('subjects')
+            .doc(effectiveSubjectId)
+            .get();
+        final rawUnits = subjectSnapshot.data()?['units'];
+        _units = rawUnits is List
+            ? rawUnits
+                .map((e) => e.toString().trim())
+                .where((e) => e.isNotEmpty)
+                .toList()
+            : [];
+      } on FirebaseException {
+        _units = <String>[];
+      }
+      _selectedUnit = savedUnit;
 
       final type =
           questionData['type']?.toString();
@@ -507,10 +551,23 @@ class _EditTeacherQuestionScreenState
   }
 
   bool _validateOptions() {
-    if (_selectedType == 'true_false' ||
-        _selectedType == 'essay') {
-      return true;
+  if (_selectedType == 'essay') {
+    return true;
+  }
+
+  if (_selectedType == 'true_false') {
+    if (_selectedCorrectOptions.length != 1 ||
+        (_selectedCorrectOptions.first != 0 &&
+         _selectedCorrectOptions.first != 1)) {
+      _showMessage(
+        'يرجى تحديد الإجابة الصحيحة: صح أو خطأ.',
+      );
+      return false;
     }
+
+    return true;
+  }
+  
 
     if (_optionControllers.length < 2) {
       _showMessage(
@@ -683,6 +740,9 @@ class _EditTeacherQuestionScreenState
       final keyRef = _firestore
           .collection('questionKeys')
           .doc(widget.questionId);
+      final unitRef = _firestore
+          .collection('questionUnit')
+          .doc(widget.questionId);
 
       final options =
           _optionControllers
@@ -756,17 +816,28 @@ class _EditTeacherQuestionScreenState
         keyData['correctOrder'] =
             FieldValue.delete();
       } else if (type == 'true_false') {
-        keyData['correctOption'] =
-            _selectedCorrectOptions.isEmpty
-                ? null
-                : _selectedCorrectOptions.first;
-        keyData['correctOptions'] =
-            FieldValue.delete();
-        keyData['correctOrder'] =
-            FieldValue.delete();
-        keyData['modelAnswer'] =
-            FieldValue.delete();
-      }
+  if (_selectedCorrectOptions.length != 1 ||
+      (_selectedCorrectOptions.first != 0 &&
+       _selectedCorrectOptions.first != 1)) {
+    _showMessage(
+      'يرجى تحديد الإجابة الصحيحة: صح أو خطأ.',
+    );
+    return;
+  }
+
+  keyData['correctOption'] =
+      _selectedCorrectOptions.first;
+
+  keyData['correctOptions'] =
+      FieldValue.delete();
+
+  keyData['correctOrder'] =
+      FieldValue.delete();
+
+  keyData['modelAnswer'] =
+      FieldValue.delete();
+}
+
 
       final batch =
           _firestore.batch();
@@ -780,6 +851,21 @@ class _EditTeacherQuestionScreenState
         keyRef,
         keyData,
       );
+
+      if (_selectedUnit.trim().isNotEmpty) {
+        batch.set(
+          unitRef,
+          {
+            'questionId': widget.questionId,
+            'teacherId': teacherId,
+            'subjectId': widget.subjectId,
+            'unitName': _selectedUnit.trim(),
+            'updatedAt': FieldValue.serverTimestamp(),
+          },
+        );
+      } else {
+        batch.delete(unitRef);
+      }
 
       await batch.commit();
 
@@ -1227,7 +1313,28 @@ class _EditTeacherQuestionScreenState
               fontWeight: FontWeight.bold,
             ),
           ),
+          const SizedBox(height: 6),
+          SelectableText(
+            'ID السؤال: ${widget.questionId}',
+            style: TextStyle(
+              fontSize: 13,
+              color: Theme.of(context).colorScheme.onSurfaceVariant,
+              fontFamily: 'monospace',
+            ),
+          ),
           const SizedBox(height: 20),
+          if (_units.isNotEmpty)
+            DropdownButtonFormField<String>(
+              value: _units.contains(_selectedUnit) ? _selectedUnit : null,
+              decoration: const InputDecoration(
+                labelText: 'الوحدة',
+                prefixIcon: Icon(Icons.view_list_outlined),
+                border: OutlineInputBorder(),
+              ),
+              items: _units.map((unit) => DropdownMenuItem<String>(value: unit, child: Text(unit))).toList(),
+              onChanged: _saving ? null : (value) => setState(() => _selectedUnit = value ?? ''),
+            ),
+          if (_units.isNotEmpty) const SizedBox(height: 16),
           Text(
             'نوع السؤال: ${_typeLabel(_selectedType ?? '')}',
             style: const TextStyle(

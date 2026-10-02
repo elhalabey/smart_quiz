@@ -1,16 +1,15 @@
-# smart_quiz
+# Smart Quiz V4.3.5
 
-A new Flutter project.
+## Question bank CSV export/import
 
-## Getting Started
+Teacher Question Bank now supports:
+- Exporting the teacher's complete question bank to `questions.csv`.
+- Importing the same CSV after editing in Excel.
+- Existing questions are updated when `questionId` is present.
+- New questions are created when `questionId` is empty.
+- Import validates teacher ownership and subject assignment.
+- `questionUnit` is updated together with the question.
+- `questionKeys` is updated for automatic/manual answer data.
+- Invalid rows are skipped and reported after import.
 
-This project is a starting point for a Flutter application.
-
-A few resources to get you started if this is your first Flutter project:
-
-- [Lab: Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Cookbook: Useful Flutter samples](https://docs.flutter.dev/cookbook)
-
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+Supported types: `single_choice`, `multiple_choice`, `true_false`, `essay`, `ordering`.

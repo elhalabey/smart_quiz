@@ -1,4 +1,5 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 
 import 'add_class_screen.dart';
@@ -51,17 +52,23 @@ Future<void> _deleteClass(
   final firestore = FirebaseFirestore.instance;
 
   try {
+    final currentUid = FirebaseAuth.instance.currentUser?.uid;
+    final userSnapshot = currentUid == null
+        ? null
+        : await firestore.collection('users').doc(currentUid).get();
+    final currentRole = userSnapshot?.data()?['role']?.toString();
+
     // ============================================================
     // 1. المعلمين + المواد المرتبطين بالفصل
     // ============================================================
 
-    final assignmentsSnapshot = await firestore
+    Query<Map<String, dynamic>> assignmentsQuery = firestore
         .collection('teacherAssignments')
-        .where(
-          'classId',
-          isEqualTo: classId,
-        )
-        .get();
+        .where('classId', isEqualTo: classId);
+    if (currentRole == 'teacher' && currentUid != null) {
+      assignmentsQuery = assignmentsQuery.where('teacherId', isEqualTo: currentUid);
+    }
+    final assignmentsSnapshot = await assignmentsQuery.get();
 
     // ============================================================
     // 2. الطلاب الموجودون في الفصل
@@ -79,13 +86,13 @@ Future<void> _deleteClass(
     // 3. الاختبارات المرتبطة بالفصل
     // ============================================================
 
-    final quizClassesSnapshot = await firestore
+    Query<Map<String, dynamic>> quizClassesQuery = firestore
         .collection('quizClasses')
-        .where(
-          'classId',
-          isEqualTo: classId,
-        )
-        .get();
+        .where('classId', isEqualTo: classId);
+    if (currentRole == 'teacher' && currentUid != null) {
+      quizClassesQuery = quizClassesQuery.where('teacherId', isEqualTo: currentUid);
+    }
+    final quizClassesSnapshot = await quizClassesQuery.get();
 
     // ============================================================
     // نستخدم batches صغيرة حتى لا نتجاوز حد Firestore

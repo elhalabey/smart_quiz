@@ -3,7 +3,6 @@ import 'package:flutter/material.dart';
 import '../../../../core/session/session_manager.dart';
 import 'quizzes/student_quizzes_screen.dart';
 import 'results/student_results_screen.dart';
-import 'lessons/student_lessons_screen.dart';
 
 class StudentDashboardScreen extends StatelessWidget {
   final SessionManager sessionManager;
@@ -117,24 +116,6 @@ class StudentDashboardScreen extends StatelessWidget {
             ),
           );
         },
-      ),
-      _DashboardItem(
-        title: 'الدروس',
-        icon: Icons.menu_book_outlined,
-        onTap: () {
-          Navigator.of(context).push(
-            MaterialPageRoute(
-              builder: (_) => StudentLessonsScreen(
-                sessionManager: sessionManager,
-              ),
-            ),
-          );
-        },
-      ),
-      _DashboardItem(
-        title: 'المواد',
-        icon: Icons.library_books_outlined,
-        onTap: () {},
       ),
       _DashboardItem(
         title: 'النتائج',

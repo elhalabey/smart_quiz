@@ -297,6 +297,29 @@ class _EditTeacherScreenState extends State<EditTeacherScreen> {
         }
       }
 
+      // مزامنة مالك/مدرّسي الفصل حتى يستطيع المعلم إدارة فصوله.
+      final classIdsForTeacher = <String>{};
+      for (final selectedId in _selectedAssignmentIds) {
+        final separatorIndex = selectedId.indexOf('_');
+        if (separatorIndex > 0) {
+          classIdsForTeacher.add(selectedId.substring(0, separatorIndex));
+        }
+      }
+
+      for (final classDoc in _classes) {
+        final classId = classDoc.id;
+        final classRef = firestore.collection('classes').doc(classId);
+        if (classIdsForTeacher.contains(classId)) {
+          batch.update(classRef, {
+            'teacherIds': FieldValue.arrayUnion([widget.teacherId]),
+          });
+        } else {
+          batch.update(classRef, {
+            'teacherIds': FieldValue.arrayRemove([widget.teacherId]),
+          });
+        }
+      }
+
       // إضافة التكليفات الجديدة.
       for (final assignmentId in _selectedAssignmentIds) {
         final separatorIndex = assignmentId.indexOf('_');

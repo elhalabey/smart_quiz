@@ -5,20 +5,16 @@ import '../../../../core/session/session_manager.dart';
 
 class AddTeacherQuestionScreen extends StatefulWidget {
   final SessionManager sessionManager;
-  final String subjectId;
-
-  // Compatibility parameters kept temporarily because the old
-  // TeacherQuestionsScreen still passes them. They are not used when
-  // saving a question to the reusable question bank.
   final String? quizId;
   final String? quizTitle;
+  final String? subjectId;
 
   const AddTeacherQuestionScreen({
     super.key,
     required this.sessionManager,
-    required this.subjectId,
     this.quizId,
     this.quizTitle,
+    this.subjectId,
   });
 
   @override
@@ -54,6 +50,73 @@ class _AddTeacherQuestionScreenState
   int? _maxCharacters;
 
   bool _saving = false;
+  bool _loadingSubjects = true;
+  String _selectedSubjectId = '';
+  final Map<String, String> _subjectNames = {};
+  final Map<String, List<String>> _subjectUnits = {};
+  String _selectedUnit = '';
+
+  @override
+  void initState() {
+    super.initState();
+    _selectedSubjectId = widget.subjectId ?? '';
+    _loadTeacherSubjects();
+  }
+
+  Future<void> _loadTeacherSubjects() async {
+    final teacherId = widget.sessionManager.currentSession?.uid;
+    if (teacherId == null || teacherId.isEmpty) {
+      if (mounted) {
+        setState(() => _loadingSubjects = false);
+      }
+      return;
+    }
+
+    try {
+      final firestore = FirebaseFirestore.instance;
+      final relations = await firestore
+          .collection('teacherSubjects')
+          .where('teacherId', isEqualTo: teacherId)
+          .get();
+
+      final subjectIds = relations.docs
+          .map((doc) => doc.data()['subjectId']?.toString() ?? '')
+          .where((id) => id.isNotEmpty)
+          .toSet();
+
+      final subjects = await firestore.collection('subjects').get();
+
+      for (final doc in subjects.docs) {
+        if (!subjectIds.contains(doc.id)) continue;
+        final data = doc.data();
+        _subjectNames[doc.id] =
+            data['nameAr']?.toString() ??
+            data['name']?.toString() ??
+            data['nameEn']?.toString() ??
+            doc.id;
+        final rawUnits = data['units'];
+        if (rawUnits is List) {
+          _subjectUnits[doc.id] = rawUnits
+              .map((e) => e.toString().trim())
+              .where((e) => e.isNotEmpty)
+              .toList();
+        }
+      }
+
+      if (_selectedSubjectId.isEmpty && subjectIds.length == 1) {
+        _selectedSubjectId = subjectIds.first;
+      }
+
+      if (mounted) {
+        setState(() => _loadingSubjects = false);
+      }
+    } catch (error) {
+      if (mounted) {
+        setState(() => _loadingSubjects = false);
+        _showMessage('تعذر تحميل مواد المعلم: $error');
+      }
+    }
+  }
 
   @override
   void dispose() {
@@ -98,6 +161,17 @@ class _AddTeacherQuestionScreenState
 
   Future<void> _saveQuestion() async {
     if (!_formKey.currentState!.validate()) {
+      return;
+    }
+
+    if (_selectedSubjectId.isEmpty) {
+      _showMessage('يرجى اختيار المادة');
+      return;
+    }
+
+    final availableUnits = _subjectUnits[_selectedSubjectId] ?? const <String>[];
+    if (availableUnits.isNotEmpty && _selectedUnit.isEmpty) {
+      _showMessage('يرجى اختيار الوحدة');
       return;
     }
 
@@ -191,7 +265,7 @@ class _AddTeacherQuestionScreenState
           )
           .where(
             'subjectId',
-            isEqualTo: widget.subjectId,
+            isEqualTo: _selectedSubjectId,
           )
           .limit(1)
           .get();
@@ -207,7 +281,7 @@ class _AddTeacherQuestionScreenState
 
       final questionData = <String, dynamic>{
         'teacherId': teacherId,
-        'subjectId': widget.subjectId,
+        'subjectId': _selectedSubjectId,
         'type': _questionType,
         'text': _questionController.text.trim(),
         'score': score,
@@ -254,7 +328,7 @@ class _AddTeacherQuestionScreenState
           break;
 
         case 'true_false':
-          keyData['correctOption'] = _correctOption;
+          keyData['correctOption'] = _correctOption ?? 0;
           break;
 
         case 'essay':
@@ -282,6 +356,20 @@ class _AddTeacherQuestionScreenState
         keyData,
       );
 
+      if (_selectedUnit.isNotEmpty) {
+        batch.set(
+          firestore.collection('questionUnit').doc(questionRef.id),
+          {
+            'questionId': questionRef.id,
+            'teacherId': teacherId,
+            'subjectId': _selectedSubjectId,
+            'unitName': _selectedUnit,
+            'createdAt': FieldValue.serverTimestamp(),
+            'updatedAt': FieldValue.serverTimestamp(),
+          },
+        );
+      }
+
       await batch.commit();
 /*
 try {
@@ -305,6 +393,11 @@ try {
 
   return;
 }*/
+
+      /*
+       * لا نضيف السؤال إلى quizQuestions هنا.
+       * ربط السؤال بالاختبار سيتم من شاشة إدارة أسئلة الاختبار.
+       */
 
       if (!mounted) {
         return;
@@ -364,6 +457,119 @@ try {
         _correctOption = 0;
       }
     });
+  }
+
+  Widget _buildSubjectDropdown() {
+    if (_loadingSubjects) {
+      return const InputDecorator(
+        decoration: InputDecoration(
+          labelText: 'المادة',
+          prefixIcon: Icon(Icons.menu_book_outlined),
+          border: OutlineInputBorder(),
+        ),
+        child: Align(
+          alignment: Alignment.centerRight,
+          child: SizedBox(
+            width: 20,
+            height: 20,
+            child: CircularProgressIndicator(strokeWidth: 2),
+          ),
+        ),
+      );
+    }
+
+    if (_subjectNames.isEmpty) {
+      return const InputDecorator(
+        decoration: InputDecoration(
+          labelText: 'المادة',
+          prefixIcon: Icon(Icons.menu_book_outlined),
+          border: OutlineInputBorder(),
+        ),
+        child: Text('لا توجد مواد مكلف بها المعلم.'),
+      );
+    }
+
+    return DropdownButtonFormField<String>(
+      value: _selectedSubjectId.isEmpty ? null : _selectedSubjectId,
+      decoration: const InputDecoration(
+        labelText: 'المادة',
+        prefixIcon: Icon(Icons.menu_book_outlined),
+        border: OutlineInputBorder(),
+      ),
+      items: _subjectNames.entries
+          .map(
+            (entry) => DropdownMenuItem<String>(
+              value: entry.key,
+              child: Text(entry.value),
+            ),
+          )
+          .toList(),
+      onChanged: _saving
+          ? null
+          : (value) async {
+              setState(() {
+                _selectedSubjectId = value ?? '';
+                _selectedUnit = '';
+              });
+              if ((value ?? '').isNotEmpty) {
+                await _loadUnitsForSubject(value!);
+              }
+            },
+      validator: (value) {
+        if (value == null || value.isEmpty) {
+          return 'يرجى اختيار المادة';
+        }
+        return null;
+      },
+    );
+  }
+
+  Future<void> _loadUnitsForSubject(String subjectId) async {
+    try {
+      final doc = await FirebaseFirestore.instance
+          .collection('subjects')
+          .doc(subjectId)
+          .get();
+      final rawUnits = doc.data()?['units'];
+      final units = rawUnits is List
+          ? rawUnits
+              .map((e) => e.toString().trim())
+              .where((e) => e.isNotEmpty)
+              .toList()
+          : <String>[];
+      if (!mounted || _selectedSubjectId != subjectId) return;
+      setState(() {
+        _subjectUnits[subjectId] = units;
+      });
+    } catch (_) {
+      if (!mounted || _selectedSubjectId != subjectId) return;
+      setState(() {
+        _subjectUnits[subjectId] = <String>[];
+      });
+    }
+  }
+
+  Widget _buildUnitDropdown() {
+    final units = _subjectUnits[_selectedSubjectId] ?? const <String>[];
+    final hasSubject = _selectedSubjectId.isNotEmpty;
+    return DropdownButtonFormField<String>(
+      value: units.contains(_selectedUnit) ? _selectedUnit : null,
+      decoration: const InputDecoration(
+        labelText: 'الوحدة',
+        prefixIcon: Icon(Icons.view_list_outlined),
+        border: OutlineInputBorder(),
+      ),
+      hint: Text(
+        !hasSubject
+            ? 'اختر المادة أولًا'
+            : (units.isEmpty ? 'لا توجد وحدات مضافة للمادة' : 'اختر الوحدة'),
+      ),
+      items: units.map((unit) => DropdownMenuItem<String>(value: unit, child: Text(unit))).toList(),
+      onChanged: (_saving || units.isEmpty)
+          ? null
+          : (value) => setState(() => _selectedUnit = value ?? ''),
+      validator: (value) => units.isNotEmpty && (value == null || value.isEmpty) ? 'اختر الوحدة' : null,
+    );
   }
 
   Widget _buildQuestionTypeDropdown() {
@@ -907,9 +1113,9 @@ try {
                             CrossAxisAlignment
                                 .stretch,
                         children: [
-                          const Text(
-                            'بنك أسئلة المعلم',
-                            style: TextStyle(
+                          Text(
+                            widget.quizTitle ?? 'بنك الأسئلة',
+                            style: const TextStyle(
                               fontSize: 18,
                               fontWeight:
                                   FontWeight.bold,
@@ -938,6 +1144,10 @@ try {
                       fontWeight: FontWeight.bold,
                     ),
                   ),
+                  const SizedBox(height: 16),
+                  _buildSubjectDropdown(),
+                  const SizedBox(height: 16),
+                  _buildUnitDropdown(),
                   const SizedBox(height: 16),
                   _buildQuestionTypeDropdown(),
                   const SizedBox(height: 16),

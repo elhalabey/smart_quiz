@@ -4,7 +4,9 @@ import '../../../core/session/session_manager.dart';
 import 'quizzes/teacher_quizzes_screen.dart';
 import 'lessons/teacher_lessons_screen.dart';
 import 'results/teacher_results_screen.dart';
+import 'classes/classes_screen.dart';
 import 'questions/teacher_question_bank_screen.dart';
+import 'students/students_screen.dart';
 
 class TeacherDashboardScreen extends StatelessWidget {
   final SessionManager sessionManager;
@@ -124,7 +126,9 @@ class TeacherDashboardScreen extends StatelessWidget {
         icon: Icons.quiz_outlined,
         onTap: () {    Navigator.of(context).push(
       MaterialPageRoute(
-        builder: (_) => TeacherQuestionBankScreen(),
+        builder: (_) => TeacherQuestionBankScreen(
+          sessionManager: sessionManager,
+        ),
       ),
     );
     },
@@ -132,7 +136,13 @@ class TeacherDashboardScreen extends StatelessWidget {
       _DashboardItem(
         title: 'الطلاب',
         icon: Icons.school_outlined,
-        onTap: () {},
+        onTap: () {
+          Navigator.of(context).push(
+            MaterialPageRoute(
+              builder: (_) => const StudentsScreen(),
+            ),
+          );        
+        },
       ),
       _DashboardItem(
         title: 'النتائج',
@@ -160,7 +170,11 @@ class TeacherDashboardScreen extends StatelessWidget {
       _DashboardItem(
         title: 'الفصول والمجموعات',
         icon: Icons.groups_outlined,
-        onTap: () {},
+        onTap: () {Navigator.of(context).push(
+            MaterialPageRoute(
+              builder: (_) => const ClassesScreen(),
+            ),
+          );},
       ),
     ];
 
